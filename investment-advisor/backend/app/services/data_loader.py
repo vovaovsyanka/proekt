@@ -60,7 +60,13 @@ class DataLoader:
         cache_file = self.cache_dir / f"{cache_key}.csv"
         if cache_file.exists():
             try:
+                # Читаем CSV и парсим дату как UTC, затем конвертируем в naive datetime
                 df = pd.read_csv(cache_file, parse_dates=['Date'], index_col='Date')
+                
+                # Конвертируем tz-aware индекс в naive (без timezone)
+                if hasattr(df.index, 'tz') and df.index.tz is not None:
+                    df.index = df.index.tz_convert('UTC').tz_localize(None)
+                
                 logger.info(f"Данные загружены из кэша: {cache_key}")
                 return df
             except Exception as e:
@@ -77,7 +83,8 @@ class DataLoader:
         """
         cache_file = self.cache_dir / f"{cache_key}.csv"
         try:
-            df.to_csv(cache_file)
+            # Сохраняем с индексом Date как колонкой
+            df.reset_index().to_csv(cache_file, index=False)
             logger.info(f"Данные сохранены в кэш: {cache_key}")
         except Exception as e:
             logger.warning(f"Ошибка записи в кэш {cache_key}: {e}")
@@ -99,7 +106,7 @@ class DataLoader:
             use_cache: Использовать ли кэш
             
         Returns:
-            DataFrame с колонками: Open, High, Low, Close, Adj Close, Volume
+            DataFrame с колонками: open, high, low, close, adj_close, volume
         """
         cache_key = self._get_cache_key(ticker, start_date, end_date)
         
@@ -129,7 +136,11 @@ class DataLoader:
                 'Volume': 'volume'
             })
             
-            # Сохранение в кэш
+            # Убираем timezone из индекса для совместимости
+            if hasattr(df.index, 'tz') and df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+            
+            # Сохранение в кэш (сбрасываем индекс чтобы Date стал колонкой)
             if use_cache:
                 self._save_to_cache(df.reset_index(), cache_key)
             

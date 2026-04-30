@@ -34,7 +34,7 @@ class ModelPredictor:
         Args:
             model_path: Путь к файлу модели .joblib
         """
-        self.model_path = model_path or settings.model_path
+        self.model_path = model_path or settings.model_file_path
         self.model = None
         self.feature_columns = None
         self.feature_importance = None

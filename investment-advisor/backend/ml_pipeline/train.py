@@ -307,7 +307,7 @@ def save_model(
     logger.info("=== Этап 6: Сохранение артефактов ===")
     
     # Создаем директорию моделей если не существует
-    settings.model_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.model_file_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Сохраняем модель вместе с метаданными
     model_data = {
@@ -325,8 +325,8 @@ def save_model(
     
     # Сохраняем в joblib формат
     import joblib
-    joblib.dump(model_data, settings.model_path)
-    logger.info(f"Модель сохранена в {settings.model_path}")
+    joblib.dump(model_data, settings.model_file_path)
+    logger.info(f"Модель сохранена в {settings.model_file_path}")
     
     # Сохраняем feature importance отдельно в JSON
     importance_path = settings.feature_importance_path
@@ -335,7 +335,7 @@ def save_model(
     logger.info(f"Feature importance сохранен в {importance_path}")
     
     # Сохраняем метрики в JSON
-    metrics_path = settings.model_path.parent / "metrics.json"
+    metrics_path = settings.model_file_path.parent / "metrics.json"
     with open(metrics_path, 'w', encoding='utf-8') as f:
         # Преобразуем numpy типы к Python типам
         serializable_metrics = {}

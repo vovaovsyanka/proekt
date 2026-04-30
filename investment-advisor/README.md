@@ -72,9 +72,28 @@ cp .env.example .env
 
 Файл `.env` не обязателен - все параметры имеют значения по умолчанию в `config.py`.
 
-### Шаг 3: Обучение модели
+### Шаг 3: Генерация данных (если yfinance не работает)
 
-Обучение ML модели на исторических данных S&P500 (занимает 5-15 минут в зависимости от интернета):
+**Важно:** Если вы видите ошибки `yfinance - ERROR - Failed to get ticker` при обучении, используйте генератор синтетических данных:
+
+```bash
+cd investment-advisor
+python backend/ml_pipeline/generate_synthetic_data.py
+```
+
+Это создаст реалистичные данные для 30 тикеров S&P500 за период 2017-2024 и сохранит их в кэш.
+
+**Почему это нужно?** Yahoo Finance может блокировать запросы из-за:
+- Частых запросов (rate limiting)
+- Отсутствия заголовков User-Agent
+- Блокировки по региону/провайдеру
+- Нестабильности API
+
+Синтетические данные используют геометрическое броуновское движение с реалистичными параметрами (доходность, волатильность, тренды по секторам).
+
+### Шаг 4: Обучение модели
+
+Обучение ML модели на исторических данных (занимает 5-15 минут):
 
 ```bash
 cd investment-advisor
@@ -97,7 +116,7 @@ python backend/ml_pipeline/train.py
 Модель сохранена в .../models/lgb_portfolio.joblib
 ```
 
-### Шаг 4: Запуск Backend (FastAPI)
+### Шаг 5: Запуск Backend (FastAPI)
 
 ```bash
 cd investment-advisor
@@ -110,7 +129,7 @@ Backend запустится на: **http://localhost:8000**
 - Swagger документация: http://localhost:8000/docs
 - Health check: http://localhost:8000/api/v1/health
 
-### Шаг 5: Запуск Frontend (Next.js)
+### Шаг 6: Запуск Frontend (Next.js)
 
 Откройте новый терминал:
 
@@ -298,13 +317,20 @@ curl http://localhost:8000/api/v1/health
 **Решение**: `pip install finta==1.3`
 
 ### Ошибка: "Model file not found"
-**Решение**: Запустите обучение: `python backend/ml_pipeline/train.py`
+**Решение**: Запустите генерацию данных и обучение:
+```bash
+python backend/ml_pipeline/generate_synthetic_data.py
+python backend/ml_pipeline/train.py
+```
+
+### Ошибка: yfinance не загружает данные
+**Решение**: Используйте генератор синтетических данных:
+```bash
+python backend/ml_pipeline/generate_synthetic_data.py
+```
 
 ### Ошибка: "Port 8000 already in use"
 **Решение**: Используйте другой порт: `uvicorn backend.app.main:app --port 8001`
-
-### Ошибка при загрузке данных yfinance
-**Решение**: Проверьте интернет-соединение. При повторных ошибках данные кэшируются в `/data/cache`
 
 ### Frontend не запускается
 **Решение**: 

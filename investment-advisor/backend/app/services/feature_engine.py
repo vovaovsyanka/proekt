@@ -59,6 +59,19 @@ class FeatureEngine:
         # Создаем копию чтобы не модифицировать исходные данные
         df = df.copy()
         
+        # Убеждаемся, что индекс без timezone (для совместимости с finta)
+        if hasattr(df.index, 'tz') and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        
+        # Отбираем только нужные колонки для finta (убираем Dividends, Stock Splits и др.)
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in required_cols:
+            if col not in df.columns:
+                logger.error(f"Отсутствует необходимая колонка: {col}")
+                return pd.DataFrame()
+        
+        df = df[required_cols].copy()
+        
         # === Скользящие средние (SMA) ===
         # SMA - простой индикатор тренда. Цена выше SMA200 = долгосрочный восходящий тренд
         for period in self.sma_periods:
@@ -132,14 +145,20 @@ class FeatureEngine:
         df = df.copy()
         
         # Убираем timezone информации для совместимости
-        if df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
+        # Проверяем тип индекса перед работой с timezone
+        if hasattr(df.index, 'tz') and df.index.tz is not None:
+            df.index = df.index.tz_convert('UTC').tz_localize(None)
         
         macro_copy = macro_df.copy()
-        if macro_copy.index.tz is not None:
-            macro_copy.index = macro_copy.index.tz_localize(None)
+        if hasattr(macro_copy.index, 'tz') and macro_copy.index.tz is not None:
+            macro_copy.index = macro_copy.index.tz_convert('UTC').tz_localize(None)
         
-        # Мердж по дате (forward fill для макро-данных, которые выходят реже)
+        # Конвертируем индексы в datetime для надежного merge
+        df.index = pd.to_datetime(df.index)
+        macro_copy.index = pd.to_datetime(macro_copy.index)
+        
+        # Мердж по дате через join (left join чтобы сохранить все даты акций)
+        # Макро-данные могут иметь другие даты, поэтому используем merge_asof или forward fill
         df = df.join(macro_copy, how='left')
         
         # Forward fill для заполнения пропусков (макро-данные обновляются реже ежедневных цен)

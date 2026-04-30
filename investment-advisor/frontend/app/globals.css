@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 0, 0, 0;
+  --background-start-rgb: 214, 219, 220;
+  --background-end-rgb: 255, 255, 255;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(
+      to bottom,
+      transparent,
+      rgb(var(--background-end-rgb))
+    )
+    rgb(var(--background-start-rgb));
+}
+
+/* Custom styles for Investment Advisor */
+.recommendation-card {
+  @apply bg-white rounded-lg shadow-md p-6 transition-all duration-200 hover:shadow-lg;
+}
+
+.action-badge {
+  @apply inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold;
+}
+
+.action-buy {
+  @apply bg-green-100 text-green-800;
+}
+
+.action-hold {
+  @apply bg-yellow-100 text-yellow-800;
+}
+
+.action-sell {
+  @apply bg-red-100 text-red-800;
+}
+
+.confidence-bar {
+  @apply h-2 bg-gray-200 rounded-full overflow-hidden;
+}
+
+.confidence-fill {
+  @apply h-full transition-all duration-300;
+}
+
+.confidence-high {
+  @apply bg-green-500;
+}
+
+.confidence-medium {
+  @apply bg-yellow-500;
+}
+
+.confidence-low {
+  @apply bg-red-500;
+}

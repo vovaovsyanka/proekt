@@ -2,7 +2,7 @@
 Конфигурация системы инвестиционных рекомендаций.
 Все настройки вынесены в единый модуль для удобства управления.
 """
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 from pathlib import Path
 import os
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # === Paths ===
     # Базовая директория проекта (родительская от backend/)
     base_dir: Path = Path(__file__).parent.parent.parent
-    model_path: Path = Path(__file__).parent.parent / "models" / "lgb_portfolio.joblib"
+    model_file_path: Path = Path(__file__).parent.parent / "models" / "lgb_portfolio.joblib"
     feature_importance_path: Path = Path(__file__).parent.parent / "models" / "feature_importance.json"
     cache_dir: Path = Path(__file__).parent.parent.parent / "data" / "cache"
     raw_data_dir: Path = Path(__file__).parent.parent.parent / "data" / "raw"
@@ -74,10 +74,12 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        protected_namespaces=('settings_',)  # Исключаем конфликт с model_* полями
+    )
 
 
 # Глобальный экземпляр настроек

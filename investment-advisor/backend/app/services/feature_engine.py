@@ -75,12 +75,14 @@ class FeatureEngine:
         
         # === MACD (Moving Average Convergence Divergence) ===
         # Показывает изменение импульса. Состоит из линии MACD, сигнальной линии и гистограммы
-        macd_df = TA.MACD(df, fast=self.macd_fast, slow=self.macd_slow, signal=self.macd_signal)
+        # finta использует имена параметров: period_fast, period_slow, signal
+        # Возвращает DataFrame с колонками ['MACD', 'SIGNAL'] (заглавными буквами!)
+        macd_df = TA.MACD(df, period_fast=self.macd_fast, period_slow=self.macd_slow, signal=self.macd_signal)
         
-        # finta возвращает DataFrame с колонками ['MACD', 'Signal', 'Hist']
+        # finta возвращает DataFrame с колонками ['MACD', 'SIGNAL'] (заглавные буквы)
         df['macd'] = macd_df['MACD']
-        df['macd_signal'] = macd_df['Signal']
-        df['macd_hist'] = macd_df['Hist']
+        df['macd_signal'] = macd_df['SIGNAL']
+        df['macd_hist'] = macd_df['MACD'] - macd_df['SIGNAL']  # Гистограмма = MACD - Signal
         
         # === ATR (Average True Range) ===
         # Мера волатильности. Используется для оценки риска
@@ -129,8 +131,16 @@ class FeatureEngine:
         
         df = df.copy()
         
+        # Убираем timezone информации для совместимости
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        
+        macro_copy = macro_df.copy()
+        if macro_copy.index.tz is not None:
+            macro_copy.index = macro_copy.index.tz_localize(None)
+        
         # Мердж по дате (forward fill для макро-данных, которые выходят реже)
-        df = df.join(macro_df, how='left')
+        df = df.join(macro_copy, how='left')
         
         # Forward fill для заполнения пропусков (макро-данные обновляются реже ежедневных цен)
         macro_cols = ['inflation_rate', 'interest_rate', 'vix']

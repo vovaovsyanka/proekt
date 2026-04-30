@@ -1,32 +1,41 @@
 ```
-# Dependencies
+# Cache and temporary data files
+data/cache/
+*.csv
+
+# Python specific
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.venv/
-venv/
-env/
+.Python
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment variables
 .env
 .env.local
 .env.*
-# Build artifacts
-dist/
-build/
-*.egg-info/
-# Logs
-*.log
-# Coverage reports
-.coverage
-coverage/
-htmlcov/
-# Testing
-.pytest_cache/
-.mypy_cache/
-# IDE
+
+# IDE and editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 *.tmp
+
+# Logs
+*.log
+
+# Coverage reports
+.coverage
+htmlcov/
+coverage/
+
+# Distribution / packaging
+*.tar.gz
+*.whl
 ```

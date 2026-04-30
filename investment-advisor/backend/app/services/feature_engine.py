@@ -144,21 +144,22 @@ class FeatureEngine:
         
         df = df.copy()
         
-        # Убираем timezone информации для совместимости
-        # Проверяем тип индекса перед работой с timezone
+        # Убеждаемся что индексы без timezone (naive datetime)
+        # Если индекс tz-aware - конвертируем в UTC и убираем timezone
         if hasattr(df.index, 'tz') and df.index.tz is not None:
             df.index = df.index.tz_convert('UTC').tz_localize(None)
+        else:
+            # Просто убеждаемся что это datetime
+            df.index = pd.to_datetime(df.index)
         
         macro_copy = macro_df.copy()
         if hasattr(macro_copy.index, 'tz') and macro_copy.index.tz is not None:
             macro_copy.index = macro_copy.index.tz_convert('UTC').tz_localize(None)
-        
-        # Конвертируем индексы в datetime для надежного merge
-        df.index = pd.to_datetime(df.index)
-        macro_copy.index = pd.to_datetime(macro_copy.index)
+        else:
+            macro_copy.index = pd.to_datetime(macro_copy.index)
         
         # Мердж по дате через join (left join чтобы сохранить все даты акций)
-        # Макро-данные могут иметь другие даты, поэтому используем merge_asof или forward fill
+        # Макро-данные могут иметь другие даты, поэтому используем forward fill
         df = df.join(macro_copy, how='left')
         
         # Forward fill для заполнения пропусков (макро-данные обновляются реже ежедневных цен)

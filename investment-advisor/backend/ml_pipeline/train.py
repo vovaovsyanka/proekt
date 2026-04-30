@@ -218,16 +218,19 @@ def train_model(
         min_child_samples=settings.lgb_min_child_samples,
         num_leaves=31,
         random_state=42,
-        verbose=-1
+        verbosity=-1  # Используем verbosity вместо verbose для инициализации
     )
     
-    # Обучение с early stopping
+    # Обучение с early stopping (в lightgbm 4.x используется callbacks)
+    early_stopping_callback = lgb.early_stopping(
+        stopping_rounds=settings.lgb_early_stopping_rounds
+    )
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
         eval_metric='logloss',
-        early_stopping_rounds=settings.lgb_early_stopping_rounds,
-        verbose=True
+        callbacks=[early_stopping_callback]
+        # verbose не передаем - используем verbosity при инициализации
     )
     
     logger.info(f"Обучение завершено. Использовано {model.best_iteration_} итераций из {settings.lgb_num_estimators}")

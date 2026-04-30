@@ -60,12 +60,18 @@ class DataLoader:
         cache_file = self.cache_dir / f"{cache_key}.csv"
         if cache_file.exists():
             try:
-                # Читаем CSV и парсим дату как UTC, затем конвертируем в naive datetime
-                df = pd.read_csv(cache_file, parse_dates=['Date'], index_col='Date')
+                # Читаем CSV и парсим дату как колонку, затем устанавливаем как индекс без TZ
+                df = pd.read_csv(cache_file, parse_dates=['Date'])
                 
-                # Конвертируем tz-aware индекс в naive (без timezone)
+                # Устанавливаем Date как индекс и гарантируем что он без timezone
+                df.set_index('Date', inplace=True)
+                
+                # Если индекс имеет timezone - убираем её (конвертируем в naive datetime)
                 if hasattr(df.index, 'tz') and df.index.tz is not None:
                     df.index = df.index.tz_convert('UTC').tz_localize(None)
+                else:
+                    # Уже naive datetime, просто убеждаемся что это datetime индекс
+                    df.index = pd.to_datetime(df.index)
                 
                 logger.info(f"Данные загружены из кэша: {cache_key}")
                 return df
@@ -83,8 +89,17 @@ class DataLoader:
         """
         cache_file = self.cache_dir / f"{cache_key}.csv"
         try:
-            # Сохраняем с индексом Date как колонкой
-            df.reset_index().to_csv(cache_file, index=False)
+            # Сбрасываем индекс чтобы Date стал колонкой
+            df_reset = df.reset_index()
+            
+            # Если индекс был timezone-aware, конвертируем в naive перед сохранением
+            if 'Date' in df_reset.columns:
+                # Конвертируем любую tz-aware дату в naive UTC
+                if hasattr(df_reset['Date'].dt, 'tz') and df_reset['Date'].dt.tz is not None:
+                    df_reset['Date'] = df_reset['Date'].dt.tz_convert('UTC').dt.tz_localize(None)
+            
+            # Сохраняем CSV
+            df_reset.to_csv(cache_file, index=False)
             logger.info(f"Данные сохранены в кэш: {cache_key}")
         except Exception as e:
             logger.warning(f"Ошибка записи в кэш {cache_key}: {e}")

@@ -305,20 +305,3 @@ async def get_available_tickers():
         "tickers": settings.default_tickers,
         "count": len(settings.default_tickers)
     }
-
-
-# Обработчики ошибок
-@router.exception_handler(404)
-async def not_found_handler(request, exc):
-    return ErrorResponse(
-        detail="Ресурс не найден",
-        error_code="NOT_FOUND"
-    )
-
-
-@router.exception_handler(500)
-async def internal_error_handler(request, exc):
-    return ErrorResponse(
-        detail="Внутренняя ошибка сервера",
-        error_code="INTERNAL_ERROR"
-    )

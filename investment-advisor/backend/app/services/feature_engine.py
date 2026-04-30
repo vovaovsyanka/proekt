@@ -1,13 +1,18 @@
 """
 Feature Engineering: расчет технических индикаторов и формирование панельных данных.
-Использует pandas-ta для вычисления индикаторов и создает признаки для ML модели.
+Использует finta для вычисления индикаторов и создает признаки для ML модели.
+
+Finta - альтернатива pandas-ta с похожим API.
+Документация: https://github.com/peerchemist/finta
 """
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
 from typing import List, Optional, Dict
 import logging
 from datetime import datetime
+
+# Импортируем индикаторы из finta
+from finta import TA
 
 from backend.config import settings
 
@@ -57,41 +62,29 @@ class FeatureEngine:
         # === Скользящие средние (SMA) ===
         # SMA - простой индикатор тренда. Цена выше SMA200 = долгосрочный восходящий тренд
         for period in self.sma_periods:
-            df[f'sma_{period}'] = ta.sma(df['close'], length=period)
+            df[f'sma_{period}'] = TA.SMA(df, period=period)
         
         # === Экспоненциальные скользящие средние (EMA) ===
         # EMA больше весит недавние цены, быстрее реагирует на изменения
         for period in self.ema_periods:
-            df[f'ema_{period}'] = ta.ema(df['close'], length=period)
+            df[f'ema_{period}'] = TA.EMA(df, period=period)
         
         # === RSI (Relative Strength Index) ===
         # Осциллятор от 0 до 100. >70 = перекупленность, <30 = перепроданность
-        df['rsi'] = ta.rsi(df['close'], length=self.rsi_period)
+        df['rsi'] = TA.RSI(df, period=self.rsi_period)
         
         # === MACD (Moving Average Convergence Divergence) ===
         # Показывает изменение импульса. Состоит из линии MACD, сигнальной линии и гистограммы
-        macd = ta.macd(
-            df['close'],
-            fast=self.macd_fast,
-            slow=self.macd_slow,
-            signal=self.macd_signal
-        )
-        df = pd.concat([df, macd], axis=1)
-        # Переименовываем колонки для удобства
-        df = df.rename(columns={
-            f'MACD_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}': 'macd',
-            f'MACDs_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}': 'macd_signal',
-            f'MACDh_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}': 'macd_hist'
-        })
+        macd_df = TA.MACD(df, fast=self.macd_fast, slow=self.macd_slow, signal=self.macd_signal)
+        
+        # finta возвращает DataFrame с колонками ['MACD', 'Signal', 'Hist']
+        df['macd'] = macd_df['MACD']
+        df['macd_signal'] = macd_df['Signal']
+        df['macd_hist'] = macd_df['Hist']
         
         # === ATR (Average True Range) ===
         # Мера волатильности. Используется для оценки риска
-        df['atr'] = ta.atr(
-            df['high'],
-            df['low'],
-            df['close'],
-            length=self.atr_period
-        )
+        df['atr'] = TA.ATR(df, period=self.atr_period)
         
         # === Логарифмическая доходность ===
         # Более стабильная метрика для финансовых временных рядов

@@ -1,12 +1,18 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import Select, { MultiValue, ActionMeta } from 'react-select';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 // Типы для данных API
 interface Position {
   ticker: string;
   shares: number;
+}
+
+interface TickerOption {
+  value: string;
+  label: string;
 }
 
 interface Recommendation {
@@ -16,6 +22,7 @@ interface Recommendation {
   expected_return: number;
   reasoning: string;
   current_price?: number;
+  target_price?: number;
 }
 
 interface PortfolioResponse {
@@ -89,13 +96,15 @@ function RecommendationCard({ rec }: { rec: Recommendation }) {
   );
 }
 
-// Компонент формы портфеля
+// Компонент формы портфеля с выпадающим списком тикеров
 function PortfolioForm({ 
   onSubmit, 
-  isLoading 
+  isLoading,
+  availableTickers
 }: { 
   onSubmit: (data: { cash: number; positions: Position[] }) => void;
   isLoading: boolean;
+  availableTickers: TickerOption[];
 }) {
   const [cash, setCash] = useState<number>(10000);
   const [positions, setPositions] = useState<Position[]>([
@@ -114,6 +123,10 @@ function PortfolioForm({
     const updated = [...positions];
     updated[index] = { ...updated[index], [field]: value };
     setPositions(updated);
+  };
+
+  const handleTickerChange = (index: number, selectedOption: TickerOption | null) => {
+    updatePosition(index, 'ticker', selectedOption?.value || '');
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -147,13 +160,23 @@ function PortfolioForm({
         
         {positions.map((pos, index) => (
           <div key={index} className="flex gap-2 mb-2">
-            <input
-              type="text"
-              placeholder="Ticker (например, AAPL)"
-              value={pos.ticker}
-              onChange={(e) => updatePosition(index, 'ticker', e.target.value.toUpperCase())}
-              className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
-              maxLength={10}
+            <Select
+              options={availableTickers}
+              value={availableTickers.find(opt => opt.value === pos.ticker) || null}
+              onChange={(option) => handleTickerChange(index, option as TickerOption | null)}
+              placeholder="Выберите тикер..."
+              className="flex-1"
+              classNamePrefix="react-select"
+              isSearchable={true}
+              isClearable={true}
+              noOptionsMessage={() => "Нет доступных тикеров"}
+              styles={{
+                control: (base) => ({
+                  ...base,
+                  borderColor: '#d1d5db',
+                  '&:hover': { borderColor: '#9ca3af' }
+                })
+              }}
             />
             <input
               type="number"
@@ -202,6 +225,35 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [totalValue, setTotalValue] = useState<number | null>(null);
   const [modelVersion, setModelVersion] = useState<string>('');
+  const [availableTickers, setAvailableTickers] = useState<TickerOption[]>([]);
+
+  // Загрузка списка доступных тикеров при монтировании компонента
+  useEffect(() => {
+    const fetchTickers = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/api/v1/tickers');
+        if (response.ok) {
+          const data = await response.json();
+          const options = data.tickers.map((ticker: string) => ({
+            value: ticker,
+            label: ticker
+          }));
+          setAvailableTickers(options);
+        } else {
+          // Fallback список тикеров если API недоступно
+          const fallbackTickers = ['SBER', 'GAZP', 'LKOH', 'NVTK', 'YNDX', 'TCSG', 'VTBR', 'ROSN', 'GMKN', 'NLMK'];
+          setAvailableTickers(fallbackTickers.map(ticker => ({ value: ticker, label: ticker })));
+        }
+      } catch (err) {
+        console.error('Ошибка загрузки тикеров:', err);
+        // Fallback список тикеров
+        const fallbackTickers = ['SBER', 'GAZP', 'LKOH', 'NVTK', 'YNDX', 'TCSG', 'VTBR', 'ROSN', 'GMKN', 'NLMK'];
+        setAvailableTickers(fallbackTickers.map(ticker => ({ value: ticker, label: ticker })));
+      }
+    };
+
+    fetchTickers();
+  }, []);
 
   const handleAnalyze = async (data: { cash: number; positions: Position[] }) => {
     setIsLoading(true);
@@ -252,7 +304,11 @@ export default function Home() {
         </header>
 
         {/* Form */}
-        <PortfolioForm onSubmit={handleAnalyze} isLoading={isLoading} />
+        <PortfolioForm 
+          onSubmit={handleAnalyze} 
+          isLoading={isLoading}
+          availableTickers={availableTickers}
+        />
 
         {/* Error Message */}
         {error && (

@@ -416,6 +416,31 @@ class FeatureEngine:
         ])
         
         return feature_cols
+    
+    def add_news_sentiment_features(
+        self, 
+        df: pd.DataFrame, 
+        news_df: pd.DataFrame,
+        ticker: str = None
+    ) -> pd.DataFrame:
+        """Добавление признаков сентимента из новостей."""
+        if df.empty or news_df.empty:
+            return df
+        
+        df = df.copy()
+        
+        # Упрощенная логика: добавляем средний сентимент по всем новостям
+        # В реальной системе нужно фильтровать по тикеру и дате
+        if 'sentiment_score' in news_df.columns:
+            avg_sentiment = news_df['sentiment_score'].mean()
+            df['news_sentiment'] = avg_sentiment
+            df['news_count'] = len(news_df)
+            
+            # Скользящее среднее сентимента
+            df['news_sentiment_7d'] = df['news_sentiment'].rolling(window=7, min_periods=1).mean()
+            df['news_count_7d'] = df['news_count'].rolling(window=7, min_periods=1).sum()
+        
+        return df
 
 
 def create_panel_data(
@@ -640,8 +665,13 @@ def evaluate_model(
             elif hasattr(est, 'calibrated_classifiers_'):
                 # Для CalibratedClassifierCV берем важность базовой модели
                 for cal_clf in est.calibrated_classifiers_:
-                    if hasattr(cal_clf.estimator_, 'coef_'):
-                        importances.append(np.abs(cal_clf.estimator_.coef_[0]))
+                    # Проверяем наличие estimator_ или base_estimator
+                    base_est = getattr(cal_clf, 'estimator_', None) or getattr(cal_clf, 'base_estimator_', None)
+                    if base_est is not None:
+                        if hasattr(base_est, 'coef_'):
+                            importances.append(np.abs(base_est.coef_[0]))
+                        elif hasattr(base_est, 'feature_importances_'):
+                            importances.append(base_est.feature_importances_)
         
         if importances:
             # Усредняем важность признаков

@@ -1,13 +1,1 @@
-```
-# Compiled Python files
-*.pyc
-__pycache__/
-
-# Model and data cache files
-investment-advisor/backend/models/*.pkl
-investment-advisor/backend/models/*_metadata.json
-investment-advisor/backend/models/feature_importance.json
-investment-advisor/backend/models/metrics.json
-investment-advisor/data/
-data/cache/
-```
+Nothing should be ignored in this case, as the only change is a modification to a Python source file (`investment-advisor/scripts/train_model.py`) which is a legitimate source code file that should be tracked in version control. There are no build artifacts, dependencies, temporary files, or other items that need to be ignored based on the provided change list.

@@ -21,8 +21,9 @@ class Settings(BaseSettings):
     # === Paths ===
     # Базовая директория проекта (родительская от backend/)
     base_dir: Path = Path(__file__).parent.parent.parent
-    model_file_path: Path = Path(__file__).parent.parent / "models" / "lgb_portfolio.joblib"
-    feature_importance_path: Path = Path(__file__).parent.parent / "models" / "feature_importance.json"
+    model_file_path: Path = Path(__file__).parent / "models" / "catboost_portfolio.cbm"
+    model_metadata_path: Path = Path(__file__).parent / "models" / "model_metadata.json"
+    feature_importance_path: Path = Path(__file__).parent / "models" / "feature_importance.json"
     cache_dir: Path = Path(__file__).parent.parent.parent / "data" / "cache"
     raw_data_dir: Path = Path(__file__).parent.parent.parent / "data" / "raw"
     features_dir: Path = Path(__file__).parent.parent.parent / "data" / "features"
@@ -30,17 +31,28 @@ class Settings(BaseSettings):
     # === Prediction Settings ===
     prediction_horizon: int = 1  # горизонт прогноза в днях
     confidence_threshold: float = 0.5  # минимальный порог уверенности
-    # Список тикеров по умолчанию для обучения модели
+    # Список российских тикеров по умолчанию для обучения модели
     default_tickers: List[str] = [
-        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
-        "JPM", "V", "JNJ", "WMT", "PG", "MA", "UNH", "HD",
-        "DIS", "PYPL", "BAC", "ADBE", "CRM", "NFLX", "CMCSA",
-        "XOM", "VZ", "KO", "PFE", "INTC", "T", "MRK", "PEP"
+        "SBER",   # Сбербанк
+        "GAZP",   # Газпром
+        "LKOH",   # Лукойл
+        "NVTK",   # Новатэк
+        "YNDX",   # Яндекс
+        "TCSG",   # Тинькофф
+        "VTBR",   # ВТБ
+        "ROSN",   # Роснефть
+        "GMKN",   # Норникель
+        "NLMK",   # НЛМК
+        "SNGS",   # Сургутнефтегаз
+        "HYDR",   # РусГидро
+        "MTSS",   # МТС
+        "CHMF",   # Северсталь
+        "MAGN"    # Магнитка
     ]
     
     # === Data Settings ===
     # Период обучения модели
-    train_start_date: str = "2018-01-01"
+    train_start_date: str = "2019-01-01"
     train_end_date: str = "2021-12-31"
     val_start_date: str = "2022-01-01"
     val_end_date: str = "2022-12-31"
@@ -48,7 +60,7 @@ class Settings(BaseSettings):
     test_end_date: str = "2024-12-31"
     
     # Количество дней данных для инференса
-    inference_lookback_days: int = 90
+    inference_lookback_days: int = 180
     # Количество новостей для анализа сентимента
     news_count_for_sentiment: int = 10
     
@@ -61,13 +73,6 @@ class Settings(BaseSettings):
     macd_slow: int = 26
     macd_signal: int = 9
     atr_period: int = 14
-    
-    # === Model Settings ===
-    lgb_num_estimators: int = 1000
-    lgb_learning_rate: float = 0.05
-    lgb_max_depth: int = 6
-    lgb_min_child_samples: int = 20
-    lgb_early_stopping_rounds: int = 50
     
     # === Server Settings ===
     host: str = "0.0.0.0"

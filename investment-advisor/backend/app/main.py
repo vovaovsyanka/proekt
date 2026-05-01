@@ -47,7 +47,7 @@ async def lifespan(app: FastAPI):
         logger.info(f"Количество признаков: {len(predictor.feature_columns)}")
     else:
         logger.warning("Модель не найдена. Приложение будет работать в fallback режиме.")
-        logger.warning("Для полноценной работы запустите: python backend/ml_pipeline/train.py")
+        logger.warning("Для полноценной работы запустите: python scripts/train_model.py")
     
     yield
     
@@ -62,17 +62,18 @@ app = FastAPI(
     description="""
 ## Система инвестиционных рекомендаций на основе ML
 
-Этот API предоставляет рекомендации по акциям используя:
+Этот API предоставляет рекомендации по российским акциям используя:
 - **Технический анализ**: RSI, MACD, SMA, EMA, ATR
-- **ML модель**: LightGBM classifier обученный на исторических данных
-- **NLP сентимент**: FinBERT для анализа тональности новостей
+- **ML модель**: CatBoost classifier обученный на исторических данных MOEX
+- **Прогнозирование временных рядов**: Prophet для forecast фичей
+- **Макроэкономические факторы**: ключевая ставка ЦБ, инфляция, курс USD/RUB, Brent
 
 ### Основные endpoints:
 - **POST /api/v1/recommendations** - Получить рекомендации по портфелю
 - **GET /api/v1/health** - Проверка статуса сервиса
-- **GET /api/v1/tickers** - Список доступных тикеров
+- **GET /api/v1/tickers** - Список доступных тикеров (российские акции)
     """,
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -116,9 +117,10 @@ async def root():
     """
     return {
         "service": "Investment Advisor API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "docs": "/docs",
-        "health": "/api/v1/health"
+        "health": "/api/v1/health",
+        "tickers": "/api/v1/tickers"
     }
 
 

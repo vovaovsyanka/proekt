@@ -183,8 +183,9 @@ async def get_recommendations(
     
     Анализирует каждый тикер из портфеля используя:
     - Технические индикаторы (RSI, MACD, SMA и др.)
-    - ML модель (LightGBM)
-    - Сентимент новостей (FinBERT)
+    - ML модель (CatBoost)
+    - Прогнозы временных рядов (Prophet features)
+    - Макроэкономические факторы
     
     Возвращает рекомендации BUY/SELL/HOLD с обоснованием.
     """
@@ -266,7 +267,7 @@ async def get_recommendations(
     response = PortfolioResponse(
         recommendations=recommendations,
         total_value=round(total_value, 2),
-        model_version="1.0.0" if predictor.model_loaded else "fallback"
+        model_version="2.0.0" if predictor.model_loaded else "fallback"
     )
     
     logger.info(f"Сгенерировано {len(recommendations)} рекомендаций")
@@ -290,7 +291,7 @@ async def health_check():
         status="ok" if predictor.model_loaded else "degraded",
         model_loaded=predictor.model_loaded,
         model_trained_date=predictor.model_trained_date,
-        version="1.0.0"
+        version="2.0.0"
     )
 
 
@@ -299,7 +300,7 @@ async def get_available_tickers():
     """
     Получить список доступных для анализа тикеров.
     
-    Возвращает тикеры из конфигурации (обученные в модели).
+    Возвращает российские тикеры из конфигурации (обученные в модели).
     """
     return {
         "tickers": settings.default_tickers,

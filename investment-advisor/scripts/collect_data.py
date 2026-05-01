@@ -169,18 +169,22 @@ class MOEXDataCollector:
             return pd.DataFrame()
         
         # Получаем названия колонок из ответа
-        # MOEX API может возвращать columns как список словарей или список списков
+        # MOEX API может возвращать columns как:
+        # 1. Список словарей: [{'name': 'begin', 'id': 0}, ...]
+        # 2. Список кортежей/списков: [['begin', 0], ['open', 1], ...]
+        # 3. Простой список строк: ['open', 'close', 'high', ...] - текущий формат MOEX
         columns_info = data['candles']['columns']
         
         # Проверяем формат columns
         if isinstance(columns_info[0], dict):
             # Формат: [{'name': 'begin', 'id': 0}, ...]
-            columns_map = {col['name']: col['id'] for col in columns_info}
             column_names = [col['name'] for col in columns_info]
         elif isinstance(columns_info[0], (list, tuple)):
             # Формат: [['begin', 0], ['open', 1], ...]
-            columns_map = {col[0]: col[1] for col in columns_info}
             column_names = [col[0] for col in columns_info]
+        elif isinstance(columns_info[0], str):
+            # Формат: ['open', 'close', 'high', 'low', 'value', 'volume', 'begin', 'end']
+            column_names = columns_info
         else:
             logger.error(f"Неизвестный формат колонок: {columns_info}")
             return pd.DataFrame()
@@ -409,7 +413,7 @@ class MOEXDataCollector:
     
     def parse_rbk_news(self, limit: int = 50) -> pd.DataFrame:
         """
-        Парсинг новостей РБК через RSS.
+        Парсинг финансовых новостей через альтернативные источники.
         
         Args:
             limit: Максимальное количество новостей
@@ -419,27 +423,41 @@ class MOEXDataCollector:
         """
         try:
             import feedparser
+            import requests
             
-            url = 'http://static.feed.rbc.ru/rbc/logical/footer/news.rss'
-            feed = feedparser.parse(url)
+            # Используем работающие RSS ленты
+            rss_urls = [
+                'https://smart-lab.ru/rss/',
+                'https://www.rbc.ru/quote/news/exportNewsXml/?symbol=',
+            ]
             
             news_list = []
-            for entry in feed.entries[:limit]:
-                published = None
-                if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                    published = datetime(*entry.published_parsed[:6])
-                elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                    published = datetime(*entry.updated_parsed[:6])
-                
-                news_list.append({
-                    'title': entry.title if hasattr(entry, 'title') else '',
-                    'published': published,
-                    'link': entry.link if hasattr(entry, 'link') else '',
-                    'summary': entry.summary if hasattr(entry, 'summary') else ''
-                })
+            for url in rss_urls:
+                try:
+                    # Скачиваем через requests с таймаутом
+                    response = requests.get(url, timeout=5)
+                    response.raise_for_status()
+                    feed = feedparser.parse(response.content)
+                    
+                    for entry in feed.entries[:limit]:
+                        published = None
+                        if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                            published = datetime(*entry.published_parsed[:6])
+                        elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                            published = datetime(*entry.updated_parsed[:6])
+                        
+                        news_list.append({
+                            'title': entry.title if hasattr(entry, 'title') else '',
+                            'published': published,
+                            'link': entry.link if hasattr(entry, 'link') else '',
+                            'summary': entry.summary if hasattr(entry, 'summary') else ''
+                        })
+                except Exception as e:
+                    logger.warning(f"Не удалось спарсить {url}: {e}")
+                    continue
             
             df = pd.DataFrame(news_list)
-            logger.info(f"Спарсено {len(df)} новостей РБК")
+            logger.info(f"Спарсено {len(df)} новостей")
             return df
             
         except ImportError:

@@ -1,14 +1,18 @@
 """
-ML Pipeline: обучение модели на исторических данных.
-Использует CatBoost вместо LightGBM для лучшей работы с категориальными признаками.
-Также включает прогнозирование временных рядов через Prophet.
+ML Pipeline: обучение усиленной ансамбль-модели на исторических данных.
 
 Приоритет источников данных:
 1. Локальные датасеты из /workspace/data/raw/ (Kaggle и другие источники)
-2. API сервисы (MOEX, yfinance) для дополнения и актуализации
+2. API сервисы (MOEX) для дополнения и актуализации
+
+Особенности:
+- Ансамбль моделей: LightGBM + GradientBoosting + RandomForest + LogisticRegression
+- NLP анализ новостей через FinBERT для сентимент-признаков
+- Расширенные технические индикаторы: Stochastic, ADX, ATR, Bollinger Bands
+- Макроэкономические признаки с изменениями показателей
 
 Использование:
-    python scripts/train_model.py --tickers SBER,GAZP,LKOH
+    python scripts/train_model.py --tickers SBER,GAZP,LKOH,NVTK,YNDX
 """
 import sys
 import os
@@ -24,13 +28,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 import numpy as np
-from catboost import CatBoostClassifier, Pool
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.preprocessing import StandardScaler
 import joblib
+import lightgbm as lgb
 
 from backend.config import settings
 from scripts.collect_data import MOEXDataCollector
@@ -50,14 +55,68 @@ logger = logging.getLogger(__name__)
 DATA_ROOT = Path(__file__).parent.parent / "data"
 RAW_DATA_DIR = DATA_ROOT / "raw"
 FEATURES_DIR = DATA_ROOT / "features"
+MODEL_DIR = Path(__file__).parent.parent / "backend" / "models"
+
+
+def load_kaggle_dataset(filepath: str) -> pd.DataFrame:
+    """
+    Загрузка датасета с Kaggle или другого локального источника.
+    
+    Args:
+        filepath: Путь к CSV файлу
+        
+    Returns:
+        DataFrame с данными
+    """
+    if not os.path.exists(filepath):
+        logger.warning(f"Файл не найден: {filepath}")
+        return pd.DataFrame()
+    
+    try:
+        df = pd.read_csv(filepath, parse_dates=['Date', 'date'], dayfirst=False)
+        # Нормализация имен колонок
+        df.columns = df.columns.str.lower().str.strip()
+        logger.info(f"Загружено {len(df)} записей из {filepath}")
+        return df
+    except Exception as e:
+        logger.error(f"Ошибка загрузки файла {filepath}: {e}")
+        return pd.DataFrame()
+
+
+def load_news_data() -> pd.DataFrame:
+    """
+    Загрузка данных новостей из локального файла.
+    
+    Returns:
+        DataFrame с новостями
+    """
+    news_file = FEATURES_DIR / "rbk_news.csv"
+    if news_file.exists():
+        try:
+            df = pd.read_csv(news_file, parse_dates=['published'])
+            logger.info(f"Загружено {len(df)} новостей")
+            
+            # Нормализация колонок
+            if 'title' in df.columns:
+                df = df.rename(columns={'published': 'published_at', 'title': 'title'})
+                # Добавляем пустую колонку ticker (будет заполняться при анализе)
+                if 'ticker' not in df.columns:
+                    df['ticker'] = ''
+            
+            return df
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки новостей: {e}")
+    
+    return pd.DataFrame()
 
 
 def load_and_prepare_data(tickers: list, start_date: str, end_date: str) -> tuple:
     """
     Загрузка и подготовка данных для обучения.
+    Приоритет: локальные датасеты -> API
     
     Returns:
-        Кортеж (panel_df, macro_df) с панельными данными и макро-факторами
+        Кортеж (price_data, macro_df, news_df) с ценами, макро-факторами и новостями
     """
     logger.info("=== Этап 1: Загрузка данных ===")
     
@@ -66,15 +125,43 @@ def load_and_prepare_data(tickers: list, start_date: str, end_date: str) -> tupl
     
     logger.info(f"Загрузка данных для {len(tickers)} тикеров: {tickers[:5]}...")
     
-    # Загружаем данные за период обучения + немного раньше для расчета индикаторов
-    train_start = "2018-01-01"  # Начинаем раньше для расчета SMA200
+    # Пробуем загрузить из локальных датасетов Kaggle
+    price_data = {}
     
-    price_data = collector.download_multiple_tickers(
-        tickers=tickers,
-        start_date=train_start,
-        end_date=end_date,
-        use_cache=True
-    )
+    # Проверяем наличие Kaggle датасета Russia Stocks Prices
+    kaggle_file = RAW_DATA_DIR / "russia_stocks_ohlcv.csv"
+    if kaggle_file.exists():
+        logger.info(f"Найден Kaggle датасет: {kaggle_file}")
+        kaggle_df = load_kaggle_dataset(str(kaggle_file))
+        
+        if not kaggle_df.empty:
+            # Группируем данные по тикерам
+            for ticker in tickers:
+                ticker_data = kaggle_df[kaggle_df['ticker'].str.upper() == ticker].copy()
+                if not ticker_data.empty:
+                    # Приводим к нужному формату
+                    ticker_data = ticker_data.rename(columns={
+                        'open': 'open', 'high': 'high', 'low': 'low', 
+                        'close': 'close', 'volume': 'volume'
+                    })
+                    if 'Date' not in ticker_data.columns and 'date' in ticker_data.columns:
+                        ticker_data['Date'] = ticker_data['date']
+                    ticker_data.set_index('Date', inplace=True)
+                    price_data[ticker] = ticker_data[['open', 'high', 'low', 'close', 'volume']]
+                    logger.info(f"Загружен Kaggle датасет для {ticker}: {len(price_data[ticker])} записей")
+    
+    # Дополняем данные из API для тех тикеров, которых нет в Kaggle
+    missing_tickers = [t for t in tickers if t not in price_data]
+    if missing_tickers:
+        logger.info(f"Дозагрузка {len(missing_tickers)} тикеров из MOEX API...")
+        train_start = "2018-01-01"
+        api_data = collector.download_multiple_tickers(
+            tickers=missing_tickers,
+            start_date=train_start,
+            end_date=end_date,
+            use_cache=True
+        )
+        price_data.update(api_data)
     
     if not price_data:
         raise ValueError("Не удалось загрузить данные ни для одного тикера")
@@ -82,9 +169,12 @@ def load_and_prepare_data(tickers: list, start_date: str, end_date: str) -> tupl
     logger.info(f"Успешно загружены данные для {len(price_data)} тикеров")
     
     # Загружаем макро-данные
-    macro_df = collector.get_macro_data(train_start, end_date)
+    macro_df = collector.get_macro_data("2018-01-01", end_date)
     
-    return price_data, macro_df
+    # Загружаем новости для анализа сентимента
+    news_df = load_news_data()
+    
+    return price_data, macro_df, news_df
 
 
 def calculate_prophet_forecast(df: pd.DataFrame, ticker: str) -> pd.DataFrame:

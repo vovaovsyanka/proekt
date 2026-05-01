@@ -2,26 +2,28 @@
 Скрипт сбора данных для бота-трейдера.
 Собирает исторические данные OHLCV, макроэкономические показатели, новости и фундаментальные данные.
 
-Приоритет источников:
-1. Готовые датасеты (Kaggle, HuggingFace, GitHub) - основной источник исторических данных
-2. MOEX ISS API - для актуализации и дополнения
-3. API ЦБ РФ - для макроэкономических показателей
-4. RSS ленты - для новостей
+Пайплайн сбора данных:
+1. Проверяем наличие готовых датасетов в data/raw/ и data/features/
+2. Если файлы существуют - загружаем их и определяем тикеры
+3. Актуализируем данные через MOEX API с момента последней записи
+4. Сохраняем все данные в единую структуру:
+   - data/raw/stocks_combined.csv - объединенные OHLCV данные по всем тикерам
+   - data/features/macro_data.csv - макроэкономические показатели
+   - data/features/news.csv - новости с тональностью
 
 Использование:
-    python scripts/collect_data.py --tickers SBER,GAZP,LKOH --start-date 2020-01-01 --end-date 2024-12-31
+    python scripts/collect_data.py --start-date 2020-01-01 --end-date 2024-12-31
 
-Все данные сохраняются в data/raw/
+Все данные сохраняются без генерации, только реальные значения из API.
 """
 import sys
 import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 import logging
-import json
 import time
-import glob
 import xml.etree.ElementTree as ET
+from typing import List, Dict, Optional, Set, Tuple
 
 # Добавляем корень проекта в path для импортов
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -29,7 +31,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pandas as pd
 import numpy as np
 import requests
-from typing import List, Dict, Optional
 from backend.config import settings
 
 logging.basicConfig(
@@ -58,45 +59,12 @@ NEWS_SOURCES = [
     }
 ]
 
-# Датасеты для загрузки
-DATASETS = {
-    'kaggle_stocks': {
-        'name': 'Russia Stocks Prices OHLCV',
-        'url': 'https://www.kaggle.com/datasets/olegshpagin/russia-stocks-prices-ohlcv',
-        'description': 'Данные по крупнейшим российским тикерам OHLCV',
-        'type': 'stocks'
-    },
-    'moex_dataset': {
-        'name': 'MOEX Dataset',
-        'url': 'https://github.com/foykes/moex-dataset',
-        'description': 'Данные по тикерам MOEX',
-        'type': 'stocks'
-    },
-    'russian_financial_news': {
-        'name': 'Russian Financial News',
-        'url': 'https://huggingface.co/datasets/Kasymkhan/RussianFinancialNews',
-        'description': 'Датасет с финансовыми новостями',
-        'type': 'news'
-    },
-    'financial_sentiment': {
-        'name': 'Financial News Sentiment',
-        'url': 'https://github.com/WebOfRussia/financial-news-sentiment',
-        'description': 'Набор данных для анализа тональности финансовых новостей',
-        'type': 'sentiment'
-    },
-    'rfsd': {
-        'name': 'RFSD - Russian Financial Statements Database',
-        'url': 'https://github.com/irlcode/RFSD',
-        'description': 'Российская база данных финансовой отчетности',
-        'type': 'fundamentals'
-    },
-    'kaggle_macro': {
-        'name': 'Russian Investment Activity',
-        'url': 'https://www.kaggle.com/datasets/demirtry/russian-investment-activity',
-        'description': 'Макроэкономические показатели: ставка ЦБ, инфляция, ВВП и др.',
-        'type': 'macro'
-    }
-}
+# Начальный список тикеров (используется ТОЛЬКО при первой загрузке)
+DEFAULT_TICKERS = [
+    "SBER", "GAZP", "LKOH", "NVTK", "YNDX", "TCSG", "VTBR", "ROSN",
+    "GMKN", "NLMK", "SNGS", "HYDR", "FEES", "TRNFP", "MTSS", "AFKS",
+    "PIKK", "CHMF", "MAGN", "RTKM", "BSPB", "VKCO", "OZON", "SGZH"
+]
 
 
 class MOEXDataCollector:
@@ -107,46 +75,63 @@ class MOEXDataCollector:
     - MOEX ISS API для котировок
     - ЦБ РФ API для макроэкономики
     - RSS ленты для новостей
+    
+    Пайплайн:
+    1. Загрузка готовых данных из data/raw/stocks_combined.csv (если существует)
+    2. Определение тикеров из загруженных данных
+    3. Актуализация через MOEX API с последней даты
+    4. Сохранение в единый файл data/raw/stocks_combined.csv
     """
     
-    def __init__(self, raw_data_dir: Optional[Path] = None):
+    def __init__(self, raw_data_dir: Optional[Path] = None, features_dir: Optional[Path] = None):
         self.raw_data_dir = raw_data_dir or settings.raw_data_dir
         self.raw_data_dir.mkdir(parents=True, exist_ok=True)
+        self.features_dir = features_dir or settings.features_dir
+        self.features_dir.mkdir(parents=True, exist_ok=True)
         
-        # Список российских тикеров по умолчанию
-        self.default_tickers = [
-            "SBER",   # Сбербанк
-            "GAZP",   # Газпром
-            "LKOH",   # Лукойл
-            "NVTK",   # Новатэк
-            "YNDX",   # Яндекс
-            "TCSG",   # Тинькофф
-            "VTBR",   # ВТБ
-            "ROSN",   # Роснефть
-            "GMKN",   # Норникель
-            "NLMK",   # НЛМК
-            "SNGS",   # Сургутнефтегаз
-            "HYDR",   # РусГидро
-            "FEES",   # ФСК ЕЭС
-            "TRNFP",  # Транснефть
-            "MTSS",   # МТС
-            "AFKS",   # АФК Система
-            "PIKK",   # ПИК
-            "CHMF",   # Северсталь
-            "MAGN",   # Магнитка
-            "RTKM",   # Ростелеком
-            "BSPB",   # Банк Санкт-Петербург
-            "VKCO",   # VK
-            "OZON",   # Ozon
-            "SGZH"    # Сахалинская энергия
-        ]
+        # Список тикеров определяется из загруженных данных
+        self.tickers: List[str] = []
     
-    def save_dataframe(self, df: pd.DataFrame, filename: str) -> Path:
-        """Сохранение DataFrame в CSV файл."""
-        filepath = self.raw_data_dir / filename
-        df.to_csv(filepath, index=True)
-        logger.info(f"Данные сохранены в {filepath}")
-        return filepath
+    def load_existing_stocks_data(self) -> pd.DataFrame:
+        """
+        Загрузить существующие данные по акциям из data/raw/stocks_combined.csv
+        
+        Returns:
+            DataFrame с колонками: Date, Ticker, open, high, low, close, volume
+        """
+        stocks_file = self.raw_data_dir / "stocks_combined.csv"
+        
+        if not stocks_file.exists():
+            logger.info("Файл stocks_combined.csv не найден, начинаем сбор с нуля")
+            return pd.DataFrame()
+        
+        try:
+            df = pd.read_csv(stocks_file, parse_dates=['Date'])
+            logger.info(f"Загружено {len(df)} записей из stocks_combined.csv")
+            
+            # Определяем тикеры из данных
+            if 'Ticker' in df.columns:
+                self.tickers = df['Ticker'].unique().tolist()
+                logger.info(f"Найдены тикеры: {self.tickers}")
+            
+            return df
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки stocks_combined.csv: {e}")
+            return pd.DataFrame()
+    
+    def get_last_date_for_ticker(self, df: pd.DataFrame, ticker: str) -> Optional[str]:
+        """Получить последнюю дату для тикера в данных."""
+        if df.empty:
+            return None
+        
+        ticker_df = df[df['Ticker'] == ticker]
+        if ticker_df.empty:
+            return None
+        
+        last_date = ticker_df['Date'].max()
+        if pd.notna(last_date):
+            return last_date.strftime('%Y-%m-%d')
+        return None
     
     def get_moex_candles(
         self, 
@@ -165,7 +150,7 @@ class MOEXDataCollector:
             interval: 24 (день), 60 (час), 10 (10 минут), 1 (1 минута)
         
         Returns:
-            DataFrame с колонками: open, high, low, close, volume
+            DataFrame с колонками: Date, open, high, low, close, volume, Ticker
         """
         url = f'https://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json'
         params = {
@@ -223,23 +208,19 @@ class MOEXDataCollector:
         
         # Переименовываем колонки в стандартный формат
         rename_map = {
-            'open': 'open',
-            'high': 'high',
-            'low': 'low',
-            'close': 'close',
-            'volume': 'volume',
             'begin': 'Date',
-            'end': 'end_time'
         }
         
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
         
         if 'Date' in df.columns:
             df['Date'] = pd.to_datetime(df['Date'])
-            df.set_index('Date', inplace=True)
+        
+        # Добавляем колонку с тикером
+        df['Ticker'] = ticker
         
         # Выбираем только нужные колонки
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        required_cols = ['Date', 'Ticker', 'open', 'high', 'low', 'close', 'volume']
         available_cols = [col for col in required_cols if col in df.columns]
         
         if available_cols:
@@ -249,63 +230,6 @@ class MOEXDataCollector:
         else:
             logger.warning(f"Не найдены нужные колонки в данных для {ticker}")
             return pd.DataFrame()
-    
-    def download_ticker_data(
-        self,
-        ticker: str,
-        start_date: str,
-        end_date: str
-    ) -> pd.DataFrame:
-        """
-        Обёртка над get_moex_candles для совместимости с data_loader.
-        
-        Args:
-            ticker: Тикер акции (например, 'SBER')
-            start_date: Дата начала в формате YYYY-MM-DD
-            end_date: Дата окончания в формате YYYY-MM-DD
-            
-        Returns:
-            DataFrame с колонками: open, high, low, close, volume
-        """
-        return self.get_moex_candles(
-            ticker=ticker,
-            start_date=start_date,
-            end_date=end_date,
-            interval=24  # дневные свечи
-        )
-    
-    def download_multiple_tickers(
-        self,
-        tickers: List[str],
-        start_date: str,
-        end_date: str
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        Загрузка данных по нескольким тикерам.
-        
-        Args:
-            tickers: Список тикеров
-            start_date: Дата начала
-            end_date: Дата окончания
-        
-        Returns:
-            Словарь {ticker: DataFrame}
-        """
-        result = {}
-        total = len(tickers)
-        
-        for i, ticker in enumerate(tickers, 1):
-            logger.info(f"[{i}/{total}] Загрузка {ticker}...")
-            df = self.get_moex_candles(ticker, start_date, end_date)
-            if not df.empty:
-                result[ticker] = df
-            
-            # Небольшая пауза между запросами для соблюдения rate limits
-            if i < total:
-                time.sleep(0.2)
-        
-        logger.info(f"Успешно загружены данные для {len(result)}/{total} тикеров")
-        return result
     
     def get_macro_data_from_cbr(
         self,
@@ -317,18 +241,22 @@ class MOEXDataCollector:
         Загружает макроэкономические данные из API Банка России.
         
         Args:
-            series_id - идентификатор ряда (например, 'RU_CPI_M' для инфляции)
+            series_id - идентификатор ряда (например, 'RU_KEY_RATE' для ключевой ставки)
         
         Returns:
             DataFrame с колонками date и value
         """
-        url = f'https://www.cbr.ru/statistics/data-service/api/v1/data/{series_id}'
+        # Используем правильный формат URL для API ЦБ РФ
+        url = f'https://cbr.ru/statistics/data-service/api/v1/data/{series_id}'
         params = {
             'from': start_date,
             'to': end_date
         }
         try:
-            response = requests.get(url, params=params)
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 404:
+                logger.warning(f"Серия данных {series_id} не найдена в API ЦБ РФ (404)")
+                return pd.DataFrame()
             response.raise_for_status()
             root = ET.fromstring(response.content)
             data = []
@@ -342,6 +270,9 @@ class MOEXDataCollector:
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
             return df
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"HTTP ошибка загрузки данных ЦБ РФ ({series_id}): {e.response.status_code}")
+            return pd.DataFrame()
         except Exception as e:
             logger.warning(f"Ошибка загрузки данных ЦБ РФ ({series_id}): {e}")
             return pd.DataFrame()
@@ -355,71 +286,69 @@ class MOEXDataCollector:
         Загрузка макроэкономических показателей РФ из реальных источников.
         
         Источники:
-        - API Банка России (ключевая ставка, курсы валют)
+        - API Банка России (ключевая ставка, курсы валют, инфляция)
         
         Args:
             start_date: Дата начала
             end_date: Дата окончания
         
         Returns:
-            DataFrame с макро-показателями
+            DataFrame с макро-показателями (без генерации данных, только NaN если API недоступно)
         """
         logger.info("Загрузка макроэкономических данных...")
         
         # Создаем даты
-        dates = pd.date_range(start=start_date, end=end_date, freq='B')
+        dates = pd.date_range(start=start_date, end=end_date, freq='D')
         n_days = len(dates)
         
         macro_data = {'date': dates}
         
         # === Ключевая ставка ЦБ РФ ===
-        # Загружаем реальные данные с API ЦБ РФ
         key_rate_df = self.get_macro_data_from_cbr('RU_KEY_RATE', start_date, end_date)
         if not key_rate_df.empty:
             key_rate_df = key_rate_df.reindex(pd.date_range(start=start_date, end=end_date, freq='D'))
             key_rate_df['key_rate'] = key_rate_df['value'].ffill()
             macro_data['key_rate'] = key_rate_df.reindex(dates)['key_rate'].values
         else:
-            logger.warning("Не удалось загрузить ключевую ставку, используем значения по умолчанию")
+            logger.warning("Не удалось загрузить ключевую ставку из API ЦБ РФ")
             macro_data['key_rate'] = np.nan
         
         # === Курс USD/RUB ===
-        usd_rub_df = self.get_macro_data_from_cbr('RU_USDRUSD', start_date, end_date)
+        usd_rub_df = self.get_macro_data_from_cbr('USD_RUB', start_date, end_date)
         if not usd_rub_df.empty:
             usd_rub_df = usd_rub_df.reindex(pd.date_range(start=start_date, end=end_date, freq='D'))
             usd_rub_df['usd_rub'] = usd_rub_df['value'].ffill()
             macro_data['usd_rub'] = usd_rub_df.reindex(dates)['usd_rub'].values
         else:
-            logger.warning("Не удалось загрузить курс USD/RUB")
+            logger.warning("Не удалось загрузить курс USD/RUB из API ЦБ РФ")
             macro_data['usd_rub'] = np.nan
         
         # === Инфляция (ИПЦ, % г/г) ===
-        inflation_df = self.get_macro_data_from_cbr('RU_CPI_M', start_date, end_date)
+        inflation_df = self.get_macro_data_from_cbr('CPI_IY', start_date, end_date)
         if not inflation_df.empty:
             inflation_df = inflation_df.reindex(pd.date_range(start=start_date, end=end_date, freq='D'))
             inflation_df['inflation'] = inflation_df['value'].ffill()
             macro_data['inflation'] = inflation_df.reindex(dates)['inflation'].values
         else:
-            logger.warning("Не удалось загрузить инфляцию")
+            logger.warning("Не удалось загрузить инфляцию из API ЦБ РФ")
             macro_data['inflation'] = np.nan
         
-        # === Brent crude oil price ===
-        # API ЦБ может не иметь прямых данных по нефти, оставляем NaN или можно добавить другой источник
+        # Цены на нефть Brent - оставляем NaN (требуется другой источник)
         macro_data['brent'] = np.nan
         
         # Создаем DataFrame
         macro_df = pd.DataFrame(macro_data)
         macro_df.set_index('date', inplace=True)
         
-        logger.info(f"Загружены макро-данные для {n_days} дней")
+        logger.info(f"Загружены макро-данные для {n_days} дней (NaN если API недоступно)")
         return macro_df
     
-    def parse_rbk_news(self, limit: int = 100) -> pd.DataFrame:
+    def parse_news(self, limit: int = 100) -> pd.DataFrame:
         """
         Парсинг финансовых новостей через RSS ленты.
         
         Args:
-            limit: Максимальное количество новостей
+            limit: Максимальное количество новостей из каждого источника
         
         Returns:
             DataFrame с новостями
@@ -485,9 +414,6 @@ class MOEXDataCollector:
             if 'published' in df.columns:
                 df = df.sort_values('published', ascending=False)
             
-            # Ограничиваем количество
-            df = df.head(limit * len(NEWS_SOURCES))
-            
             logger.info(f"Итого загружено {len(df)} уникальных новостей")
             return df
             
@@ -498,76 +424,76 @@ class MOEXDataCollector:
             logger.error(f"Ошибка парсинга новостей: {e}")
             return pd.DataFrame()
     
-    def load_kaggle_dataset(self, dataset_path: str) -> Optional[pd.DataFrame]:
+    def analyze_sentiment(self, texts: List[str]) -> List[float]:
         """
-        Загрузка готового датасета с Kaggle.
-        
-        Поддерживаемые датасеты:
-        - olegshpagin/russia-stocks-prices-ohlcv
+        Анализ тональности текстов с помощью предобученной модели.
         
         Args:
-            dataset_path: Путь к файлу датасета
+            texts: Список текстов для анализа
         
         Returns:
-            DataFrame с данными или None если файл не найден
+            Список оценок тональности (от -1 до 1)
         """
-        path = Path(dataset_path)
-        
-        if not path.exists():
-            logger.warning(f"Файл датасета не найден: {dataset_path}")
-            return None
-        
         try:
-            if path.suffix == '.csv':
-                df = pd.read_csv(path, parse_dates=['Date'])
-                if 'Date' in df.columns:
-                    df.set_index('Date', inplace=True)
-                logger.info(f"Загружен Kaggle датасет: {dataset_path}, {len(df)} записей")
-                return df
-            else:
-                logger.warning(f"Неподдерживаемый формат файла: {path.suffix}")
-                return None
+            from transformers import pipeline
+            
+            # Загрузка модели для русского финансового рынка
+            sentiment_pipeline = pipeline(
+                "sentiment-analysis", 
+                model="serguntsov/rubert-tiny2-russian-financial-sentiment",
+                return_all_scores=False
+            )
+            
+            results = []
+            for text in texts:
+                try:
+                    result = sentiment_pipeline(text[:512])[0]  # Ограничиваем длину текста
+                    # Преобразуем LABEL в числовое значение
+                    score = result['score']
+                    if result['label'] == 'NEGATIVE':
+                        score = -score
+                    results.append(round(score, 4))
+                except Exception:
+                    results.append(0.0)  # Нейтральная оценка при ошибке
+            
+            return results
+            
+        except ImportError:
+            logger.warning("transformers не установлен. Пропускаем анализ тональности.")
+            return [0.0] * len(texts)
         except Exception as e:
-            logger.error(f"Ошибка загрузки датасета: {e}")
-            return None
+            logger.warning(f"Ошибка анализа тональности: {e}")
+            return [0.0] * len(texts)
     
-    def merge_datasets(self, primary_df: pd.DataFrame, secondary_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Объединение двух датасетов с удалением дубликатов.
+    def save_stocks_data(self, df: pd.DataFrame):
+        """Сохранение данных по акциям в единый файл."""
+        if df.empty:
+            logger.warning("Пустой DataFrame, сохранение пропущено")
+            return
         
-        Приоритет отдается primary_df. Данные из secondary_df добавляются
-        только для тех дат, которых нет в primary_df.
+        filepath = self.raw_data_dir / "stocks_combined.csv"
+        df.to_csv(filepath, index=False)
+        logger.info(f"Данные по акциям сохранены в {filepath} ({len(df)} записей)")
+    
+    def save_macro_data(self, df: pd.DataFrame):
+        """Сохранение макро-данных."""
+        if df.empty:
+            logger.warning("Пустой DataFrame макро-данных")
+            return
         
-        Args:
-            primary_df: Основной датасет (приоритетный)
-            secondary_df: Дополнительный датасет
+        filepath = self.features_dir / "macro_data.csv"
+        df.to_csv(filepath)
+        logger.info(f"Макро-данные сохранены в {filepath}")
+    
+    def save_news_data(self, df: pd.DataFrame):
+        """Сохранение новостей."""
+        if df.empty:
+            logger.warning("Пустой DataFrame новостей")
+            return
         
-        Returns:
-            Объединенный DataFrame
-        """
-        if primary_df.empty:
-            return secondary_df.copy()
-        if secondary_df.empty:
-            return primary_df.copy()
-        
-        # Определяем даты которые есть только во вторичном датасете
-        primary_dates = set(primary_df.index)
-        secondary_dates = set(secondary_df.index)
-        new_dates = secondary_dates - primary_dates
-        
-        if not new_dates:
-            logger.info("Дублирование данных: все даты уже присутствуют в основном датасете")
-            return primary_df.copy()
-        
-        # Фильтруем вторичный датасет
-        secondary_new = secondary_df[secondary_df.index.isin(new_dates)]
-        
-        # Объединяем
-        merged = pd.concat([primary_df, secondary_new])
-        merged = merged.sort_index()
-        
-        logger.info(f"Объединено датасетов: {len(primary_df)} + {len(secondary_new)} = {len(merged)} записей")
-        return merged
+        filepath = self.features_dir / "news.csv"
+        df.to_csv(filepath, index=False)
+        logger.info(f"Новости сохранены в {filepath}")
 
 
 def main():
@@ -577,7 +503,7 @@ def main():
         '--tickers', 
         type=str, 
         default=None,
-        help='Список тикеров через запятую (по умолчанию все из конфига)'
+        help='Список тикеров через запятую (по умолчанию все из существующих данных)'
     )
     parser.add_argument(
         '--start-date', 
@@ -592,21 +518,15 @@ def main():
         help='Дата окончания в формате YYYY-MM-DD'
     )
     parser.add_argument(
-        '--no-cache', 
+        '--force-refresh', 
         action='store_true',
-        help='Не использовать кэш'
+        help='Игнорировать существующие данные и загрузить заново'
     )
     parser.add_argument(
         '--output-dir',
         type=str,
         default=None,
         help='Директория для сохранения данных'
-    )
-    parser.add_argument(
-        '--kaggle-dataset',
-        type=str,
-        default=None,
-        help='Путь к Kaggle датасету для приоритетной загрузки'
     )
     
     args = parser.parse_args()
@@ -616,92 +536,141 @@ def main():
     logger.info("="*60)
     logger.info(f"Время запуска: {datetime.now().isoformat()}")
     
-    # Определяем тикеры
-    if args.tickers:
-        tickers = [t.strip().upper() for t in args.tickers.split(',')]
-    else:
-        collector = MOEXDataCollector()
-        tickers = collector.default_tickers
-    
-    logger.info(f"Тикеры для сбора: {tickers}")
-    logger.info(f"Период: {args.start_date} - {args.end_date}")
-    
     # Инициализация сборщика
     collector = MOEXDataCollector()
     
-    # Попытка загрузки готового датасета (приоритет №1)
-    price_data = {}
-    if args.kaggle_dataset:
-        logger.info("\n=== Загрузка готового Kaggle датасета ===")
-        kaggle_df = collector.load_kaggle_dataset(args.kaggle_dataset)
-        if kaggle_df is not None:
-            # Разделяем по тикерам если есть колонка 'Ticker'
-            if 'Ticker' in kaggle_df.columns or 'ticker' in kaggle_df.columns:
-                ticker_col = 'Ticker' if 'Ticker' in kaggle_df.columns else 'ticker'
-                for ticker in tickers:
-                    ticker_df = kaggle_df[kaggle_df[ticker_col] == ticker].copy()
-                    if not ticker_df.empty:
-                        if 'Date' in ticker_df.columns:
-                            ticker_df.set_index('Date', inplace=True)
-                        price_data[ticker] = ticker_df
-                        logger.info(f"Загружен {ticker}: {len(ticker_df)} записей из Kaggle")
+    # Шаг 1: Загружаем существующие данные (если есть и не force-refresh)
+    logger.info("\n=== Проверка существующих данных ===")
+    stocks_df = pd.DataFrame()
+    
+    if not args.force_refresh:
+        stocks_df = collector.load_existing_stocks_data()
+    
+    # Определяем список тикеров
+    if args.tickers:
+        # Пользователь явно указал тикеры
+        tickers = [t.strip().upper() for t in args.tickers.split(',')]
+        logger.info(f"Используем тикеры из аргументов: {tickers}")
+    elif collector.tickers:
+        # Используем тикеры из загруженных данных
+        tickers = collector.tickers.copy()
+        logger.info(f"Используем тикеры из существующих данных: {tickers}")
+    else:
+        # Данные отсутствуют - используем дефолтный список для первичной загрузки
+        # Это единственный случай использования дефолтных тикеров
+        tickers = DEFAULT_TICKERS.copy()
+        logger.info(f"Данные отсутствуют, используем начальный набор тикеров: {tickers}")
+    
+    logger.info(f"Период: {args.start_date} - {args.end_date}")
+    logger.info(f"Всего тикеров: {len(tickers)}")
+    
+    # Шаг 2: Для каждого тикера проверяем последнюю дату и добираем данные через API
+    logger.info("\n=== Сбор/актуализация данных по акциям (MOEX API) ===")
+    
+    all_tickers_data = []
+    
+    for i, ticker in enumerate(tickers, 1):
+        logger.info(f"[{i}/{len(tickers)}] Обработка {ticker}...")
+        
+        # Получаем последнюю дату в существующих данных для этого тикера
+        last_date = collector.get_last_date_for_ticker(stocks_df, ticker)
+        
+        if last_date and not args.force_refresh:
+            # Есть данные - добираем с последней даты
+            fetch_from = (pd.to_datetime(last_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+            logger.info(f"  Последняя запись: {last_date}, добираем с {fetch_from}")
+            
+            if fetch_from <= args.end_date:
+                new_data = collector.get_moex_candles(ticker, fetch_from, args.end_date)
+                if not new_data.empty:
+                    all_tickers_data.append(new_data)
+                    logger.info(f"  Добавлено {len(new_data)} новых записей")
+                else:
+                    logger.info(f"  Новых данных нет")
+                
+                # Добавляем существующие данные для этого тикера
+                existing_ticker_data = stocks_df[stocks_df['Ticker'] == ticker].copy()
+                if not existing_ticker_data.empty:
+                    all_tickers_data.append(existing_ticker_data)
             else:
-                # Если тикеров нет, считаем что это данные одного тикера
-                price_data[tickers[0]] = kaggle_df
-                logger.info(f"Загружены данные для {tickers[0]}: {len(kaggle_df)} записей из Kaggle")
+                logger.info(f"  Данные актуальны")
+                # Добавляем существующие данные
+                existing_ticker_data = stocks_df[stocks_df['Ticker'] == ticker].copy()
+                if not existing_ticker_data.empty:
+                    all_tickers_data.append(existing_ticker_data)
+        else:
+            # Нет данных или force-refresh - загружаем весь период
+            logger.info(f"  {'Принудительная перезагрузка' if args.force_refresh else 'Нет данных, загружаем весь период'}")
+            full_data = collector.get_moex_candles(ticker, args.start_date, args.end_date)
+            if not full_data.empty:
+                all_tickers_data.append(full_data)
+                logger.info(f"  Загружено {len(full_data)} записей")
     
-    # Сбор данных по акциям из MOEX API (приоритет №2 - дополнение)
-    logger.info("\n=== Сбор данных по акциям (MOEX API) ===")
-    moex_data = collector.download_multiple_tickers(
-        tickers=tickers,
-        start_date=args.start_date,
-        end_date=args.end_date
-    )
+    # Объединяем все данные
+    if all_tickers_data:
+        combined_df = pd.concat(all_tickers_data, ignore_index=True)
+        # Удаляем дубликаты (по Date и Ticker)
+        combined_df = combined_df.drop_duplicates(subset=['Date', 'Ticker'], keep='first')
+        # Сортируем
+        combined_df = combined_df.sort_values(['Ticker', 'Date'])
+        logger.info(f"\nОбъединено данных: {len(combined_df)} записей")
+    else:
+        combined_df = pd.DataFrame()
+        logger.warning("\nНет данных для сохранения")
     
-    # Объединяем датасеты с удалением дубликатов
-    for ticker in tickers:
-        if ticker in price_data and ticker in moex_data:
-            price_data[ticker] = collector.merge_datasets(price_data[ticker], moex_data[ticker])
-        elif ticker in moex_data and ticker not in price_data:
-            price_data[ticker] = moex_data[ticker]
+    # Сохраняем объединенные данные
+    if not combined_df.empty:
+        collector.save_stocks_data(combined_df)
     
     # Сбор макро-данных
     logger.info("\n=== Сбор макроэкономических данных ===")
     macro_df = collector.get_macro_data(args.start_date, args.end_date)
-    
-    # Сохранение макро-данных
-    output_dir = Path(args.output_dir) if args.output_dir else settings.features_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    macro_path = output_dir / "macro_data.csv"
-    macro_df.to_csv(macro_path)
-    logger.info(f"Макро-данные сохранены в {macro_path}")
+    collector.save_macro_data(macro_df)
     
     # Парсинг новостей
     logger.info("\n=== Парсинг новостей ===")
-    news_df = collector.parse_rbk_news(limit=100)
-    if not news_df.empty:
-        news_path = output_dir / "rbk_news.csv"
-        news_df.to_csv(news_path, index=False)
-        logger.info(f"Новости сохранены в {news_path}")
+    news_df = collector.parse_news(limit=100)
+    
+    # Анализ тональности новостей (если transformers установлен)
+    if not news_df.empty and 'title' in news_df.columns:
+        logger.info("Анализ тональности новостей...")
+        titles = news_df['title'].fillna('').tolist()
+        sentiments = collector.analyze_sentiment(titles)
+        news_df['sentiment'] = sentiments
+        logger.info(f"Тональность проанализирована для {len(news_df)} новостей")
+    
+    collector.save_news_data(news_df)
     
     # Статистика
     logger.info("\n" + "="*60)
     logger.info("ИТОГИ СБОРА ДАННЫХ")
     logger.info("="*60)
-    logger.info(f"Загружено тикеров: {len(price_data)}/{len(tickers)}")
-    logger.info(f"Макро-данных: {len(macro_df)} записей")
+    
+    if not combined_df.empty:
+        unique_tickers = combined_df['Ticker'].unique()
+        logger.info(f"Загружено тикеров: {len(unique_tickers)}")
+        logger.info(f"Всего записей OHLCV: {len(combined_df)}")
+        
+        # Показываем статистику по первым 5 тикерам
+        for ticker in list(unique_tickers)[:5]:
+            ticker_df = combined_df[combined_df['Ticker'] == ticker]
+            logger.info(f"\n{ticker}:")
+            logger.info(f"  Период: {ticker_df['Date'].min()} - {ticker_df['Date'].max()}")
+            logger.info(f"  Записей: {len(ticker_df)}")
+            logger.info(f"  Цена: {ticker_df['close'].iloc[0]:.2f} → {ticker_df['close'].iloc[-1]:.2f}")
+    else:
+        logger.info("Данные по акциям не загружены")
+    
+    logger.info(f"\nМакро-данных: {len(macro_df)} записей")
     logger.info(f"Новостей: {len(news_df)} записей")
     
-    for ticker, df in list(price_data.items())[:5]:
-        logger.info(f"\n{ticker}:")
-        logger.info(f"  Период: {df.index.min()} - {df.index.max()}")
-        logger.info(f"  Записей: {len(df)}")
-        logger.info(f"  Цена: {df['close'].iloc[0]:.2f} → {df['close'].iloc[-1]:.2f}")
-    
     logger.info("\n✅ Сбор данных завершен!")
-    logger.info("Для обучения модели запустите: python scripts/train_model.py")
-    
+    logger.info(f"Данные сохранены:")
+    logger.info(f"  - {collector.raw_data_dir / 'stocks_combined.csv'}")
+    logger.info(f"  - {collector.features_dir / 'macro_data.csv'}")
+    logger.info(f"  - {collector.features_dir / 'news.csv'}")
+    logger.info("\nДля обучения модели запустите: python scripts/train_model.py")
+
 
 if __name__ == "__main__":
     main()

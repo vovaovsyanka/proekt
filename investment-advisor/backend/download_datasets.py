@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """
 Скачивание и подготовка всех датасетов (Kaggle, Hugging Face, GitHub).
-Новости загружаются напрямую из parquet-файлов репозитория.
+
+Источники:
+- Kaggle: olegshpagin/russia-stocks-prices-ohlcv (OHLCV данные)
+- Kaggle: demirtry/russian-investment-activity (макроэкономика)
+- HuggingFace: Kasymkhan/RussianFinancialNews (новости)
+- HuggingFace: irlspbru/RFSD (фундаментальные данные)
+- GitHub: moex-dataset, financial-news-sentiment (дополнительно)
+
+Использование:
+    python download_datasets.py
 """
 import logging
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 import pandas as pd
 import kagglehub
@@ -31,6 +39,7 @@ def download_kaggle_dataset(identifier: str, extract_subfolder: str = None):
     try:
         path = Path(kagglehub.dataset_download(identifier))
         logger.info(f"  -> {path}")
+        
         if extract_subfolder:
             sub_path = path / extract_subfolder
             if sub_path.exists():
@@ -41,10 +50,8 @@ def download_kaggle_dataset(identifier: str, extract_subfolder: str = None):
                     elif item.is_dir() and not dst.exists():
                         shutil.copytree(item, dst)
         else:
-            csv_files = list(path.rglob("*.csv"))
-            for f in csv_files:
-                dst = RAW_DIR / f.name
-                shutil.copy2(f, dst)
+            for f in path.rglob("*.csv"):
+                shutil.copy2(f, RAW_DIR / f.name)
                 logger.info(f"  -> скопирован {f.name}")
         return path
     except Exception as e:
@@ -53,10 +60,11 @@ def download_kaggle_dataset(identifier: str, extract_subfolder: str = None):
 
 
 def download_news_parquet():
-    """Загружает train и test датасеты новостей напрямую через huggingface_hub."""
-    logger.info("Скачивание новостного датасета (прямые ссылки)...")
+    """Загружает новости из HuggingFace в формате parquet."""
+    logger.info("Скачивание новостного датасета...")
     repo_id = "Kasymkhan/RussianFinancialNews"
     frames = []
+    
     for split in ("train", "test"):
         try:
             local_path = hf_hub_download(
@@ -69,6 +77,7 @@ def download_news_parquet():
             logger.info(f"  -> загружен {split}: {len(df)} записей")
         except Exception as e:
             logger.error(f"  -> ошибка загрузки {split}: {e}")
+    
     if frames:
         full = pd.concat(frames, ignore_index=True)
         dst = RAW_DIR / "Kasymkhan_RussianFinancialNews.parquet"
@@ -78,16 +87,16 @@ def download_news_parquet():
     return None
 
 
-def clone_github_repo(repo_url: str, target_dir: str | None = None) -> Path | None:
+def clone_github_repo(repo_url: str, target_dir: Path = None) -> Path:
     """Клонирует GitHub-репозиторий, если его ещё нет."""
     if target_dir is None:
         repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
         target_dir = RAW_DIR / repo_name
-    else:
-        target_dir = Path(target_dir)
+    
     if target_dir.exists():
         logger.info(f"Репозиторий {repo_url} уже существует, пропускаем")
         return target_dir
+    
     logger.info(f"Клонирование GitHub: {repo_url}")
     try:
         subprocess.run(["git", "clone", "--depth", "1", repo_url, str(target_dir)], check=True)
@@ -98,25 +107,9 @@ def clone_github_repo(repo_url: str, target_dir: str | None = None) -> Path | No
         return None
 
 
-def main():
-    logger.info("=" * 60)
-    logger.info("Загрузка всех необходимых датасетов")
-    logger.info("=" * 60)
-
-    # 1. OHLCV (дневные свечи)
-    download_kaggle_dataset("olegshpagin/russia-stocks-prices-ohlcv", extract_subfolder="D1")
-
-    # 2. ALGOPACK (расширенные данные)
-    download_kaggle_dataset("olegshpagin/algopack-extra-market-data")
-
-    # 3. Макроэкономика
-    download_kaggle_dataset("demirtry/russian-investment-activity")
-
-    # 4. Новости – прямая загрузка parquet
-    download_news_parquet()
-
-    # 5. RFSD (фундаментальные) – если Hugging Face доступен
-    logger.info("Скачивание RFSD (2023)...")
+def download_rfsd():
+    """Загружает фундаментальные данные RFSD."""
+    logger.info("Скачивание RFSD (фундаментальные данные)...")
     try:
         from datasets import load_dataset
         ds = load_dataset("irlspbru/RFSD", "2023", split="train", streaming=False)
@@ -124,33 +117,67 @@ def main():
         dst = RAW_DIR / "rfsd_2023.parquet"
         df.to_parquet(dst)
         logger.info(f"  -> сохранён в {dst}")
+        return dst
     except Exception as e:
         logger.warning(f"  -> ошибка: {e}")
+        return None
 
-    # 6. GitHub
+
+def create_ticker_list():
+    """Создает ticker_list.csv из имён файлов *_D1.csv."""
+    ticker_file = RAW_DIR / "ticker_list.csv"
+    if ticker_file.exists():
+        logger.info("ticker_list.csv уже существует")
+        return ticker_file
+    
+    logger.info("Создание ticker_list.csv...")
+    tickers = set()
+    
+    for f in RAW_DIR.glob("*_D1.csv"):
+        ticker = f.stem.replace("_D1", "").upper()
+        if ticker:
+            tickers.add(ticker)
+    
+    if tickers:
+        pd.DataFrame({"ticker": sorted(tickers)}).to_csv(ticker_file, index=False)
+        logger.info(f"  -> создан с {len(tickers)} тикерами")
+    else:
+        fallback = ["SBER","GAZP","LKOH","NVTK","YNDX","TCSG","VTBR",
+                    "ROSN","GMKN","NLMK","SNGS","HYDR","MTSS","CHMF","MAGN"]
+        pd.DataFrame({"ticker": fallback}).to_csv(ticker_file, index=False)
+        logger.info(f"  -> создан fallback список с {len(fallback)} тикерами")
+    
+    return ticker_file
+
+
+def main():
+    logger.info("=" * 60)
+    logger.info("Загрузка всех необходимых датасетов")
+    logger.info("=" * 60)
+
+    # 1. OHLCV данные (дневные свечи) - ОСНОВНОЙ
+    download_kaggle_dataset("olegshpagin/russia-stocks-prices-ohlcv", extract_subfolder="D1")
+
+    # 2. Макроэкономика - ОСНОВНОЙ
+    download_kaggle_dataset("demirtry/russian-investment-activity")
+
+    # 3. Новости - ОСНОВНОЙ
+    download_news_parquet()
+
+    # 4. Фундаментальные данные - ОСНОВНОЙ
+    download_rfsd()
+
+    # 5. GitHub репозитории - ДОПОЛНИТЕЛЬНО
     clone_github_repo("https://github.com/foykes/moex-dataset.git")
     clone_github_repo("https://github.com/WebOfRussia/financial-news-sentiment.git")
 
-    # 7. Создание ticker_list.csv из имён файлов *_D1.csv
-    ticker_file = RAW_DIR / "ticker_list.csv"
-    if not ticker_file.exists():
-        logger.info("Создание ticker_list.csv...")
-        tickers = set()
-        for f in RAW_DIR.glob("*_D1.csv"):
-            ticker = f.stem.replace("_D1", "")
-            if ticker:
-                tickers.add(ticker.upper())
-        if tickers:
-            pd.DataFrame({"ticker": sorted(tickers)}).to_csv(ticker_file, index=False)
-            logger.info(f"  -> создан с {len(tickers)} тикерами")
-        else:
-            fallback = ["SBER","GAZP","LKOH","NVTK","YNDX","TCSG","VTBR",
-                        "ROSN","GMKN","NLMK","SNGS","HYDR","MTSS","CHMF","MAGN"]
-            pd.DataFrame({"ticker": fallback}).to_csv(ticker_file, index=False)
+    # 6. Создание списка тикеров
+    create_ticker_list()
 
     logger.info("=" * 60)
-    logger.info("Загрузка датасетов завершена!")
+    logger.info("✅ Загрузка датасетов завершена!")
     logger.info("=" * 60)
+    logger.info("\nСледующий шаг: python data_pipeline.py --start-date 2020-01-01 --end-date 2024-12-31")
 
 
 if __name__ == "__main__":

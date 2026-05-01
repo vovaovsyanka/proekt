@@ -2,6 +2,11 @@
 Скрипт сбора данных с Московской Биржи (MOEX).
 Собирает исторические данные OHLCV, макроэкономические показатели и новости.
 
+Приоритет источников:
+1. Готовые датасеты (Kaggle, HuggingFace, GitHub) - основной источник
+2. MOEX ISS API - для дополнения и актуализации
+3. RSS ленты - для новостей
+
 Использование:
     python scripts/collect_data.py --tickers SBER,GAZP,LKOH --start-date 2020-01-01 --end-date 2024-12-31
 """
@@ -13,6 +18,7 @@ import logging
 import json
 import hashlib
 import time
+import glob
 
 # Добавляем корень проекта в path для импортов
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -28,6 +34,26 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+# Рабочие RSS ленты финансовых новостей
+NEWS_SOURCES = [
+    {
+        'name': 'Smart-Lab',
+        'url': 'https://smart-lab.ru/rss/',
+        'type': 'rss'
+    },
+    {
+        'name': 'RBC Finance',
+        'url': 'https://www.rbc.ru/quote/news/index.xml',
+        'type': 'rss'
+    },
+    {
+        'name': 'Investing.com Russia',
+        'url': 'https://ru.investing.com/rss/news.rss',
+        'type': 'rss'
+    }
+]
 
 
 class MOEXDataCollector:
@@ -411,9 +437,9 @@ class MOEXDataCollector:
         logger.info(f"Загружены макро-данные для {n_days} дней")
         return macro_df
     
-    def parse_rbk_news(self, limit: int = 50) -> pd.DataFrame:
+    def parse_rbk_news(self, limit: int = 100) -> pd.DataFrame:
         """
-        Парсинг финансовых новостей через альтернативные источники.
+        Парсинг финансовых новостей через RSS ленты.
         
         Args:
             limit: Максимальное количество новостей
@@ -423,41 +449,69 @@ class MOEXDataCollector:
         """
         try:
             import feedparser
-            import requests
-            
-            # Используем работающие RSS ленты
-            rss_urls = [
-                'https://smart-lab.ru/rss/',
-                'https://www.rbc.ru/quote/news/exportNewsXml/?symbol=',
-            ]
             
             news_list = []
-            for url in rss_urls:
+            for source in NEWS_SOURCES:
                 try:
-                    # Скачиваем через requests с таймаутом
-                    response = requests.get(url, timeout=5)
-                    response.raise_for_status()
-                    feed = feedparser.parse(response.content)
+                    logger.info(f"Парсинг новостей из {source['name']} ({source['url']})...")
+                    feed = feedparser.parse(source['url'])
+                    
+                    if not feed.entries:
+                        logger.warning(f"Нет записей в ленте {source['name']}")
+                        continue
                     
                     for entry in feed.entries[:limit]:
                         published = None
                         if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                            published = datetime(*entry.published_parsed[:6])
+                            try:
+                                published = datetime(*entry.published_parsed[:6])
+                            except (TypeError, ValueError):
+                                published = datetime.now()
                         elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                            published = datetime(*entry.updated_parsed[:6])
+                            try:
+                                published = datetime(*entry.updated_parsed[:6])
+                            except (TypeError, ValueError):
+                                published = datetime.now()
+                        
+                        title = entry.title if hasattr(entry, 'title') else ''
+                        link = entry.link if hasattr(entry, 'link') else ''
+                        summary = entry.summary if hasattr(entry, 'summary') else ''
+                        
+                        # Пропускаем пустые новости
+                        if not title and not summary:
+                            continue
                         
                         news_list.append({
-                            'title': entry.title if hasattr(entry, 'title') else '',
+                            'title': title,
                             'published': published,
-                            'link': entry.link if hasattr(entry, 'link') else '',
-                            'summary': entry.summary if hasattr(entry, 'summary') else ''
+                            'link': link,
+                            'summary': summary,
+                            'source': source['name']
                         })
+                    
+                    logger.info(f"Загружено {min(limit, len(feed.entries))} новостей из {source['name']}")
+                    
                 except Exception as e:
-                    logger.warning(f"Не удалось спарсить {url}: {e}")
+                    logger.warning(f"Не удалось спарсить {source['name']}: {e}")
                     continue
             
+            if not news_list:
+                logger.warning("Новости не загружены ни из одного источника")
+                return pd.DataFrame()
+            
             df = pd.DataFrame(news_list)
-            logger.info(f"Спарсено {len(df)} новостей")
+            
+            # Удаляем дубликаты по заголовкам
+            df = df.drop_duplicates(subset=['title'], keep='first')
+            
+            # Сортируем по дате
+            if 'published' in df.columns:
+                df = df.sort_values('published', ascending=False)
+            
+            # Ограничиваем количество
+            df = df.head(limit * len(NEWS_SOURCES))
+            
+            logger.info(f"Итого загружено {len(df)} уникальных новостей")
             return df
             
         except ImportError:
@@ -466,6 +520,77 @@ class MOEXDataCollector:
         except Exception as e:
             logger.error(f"Ошибка парсинга новостей: {e}")
             return pd.DataFrame()
+    
+    def load_kaggle_dataset(self, dataset_path: str) -> Optional[pd.DataFrame]:
+        """
+        Загрузка готового датасета с Kaggle.
+        
+        Поддерживаемые датасеты:
+        - olegshpagin/russia-stocks-prices-ohlcv
+        
+        Args:
+            dataset_path: Путь к файлу датасета
+        
+        Returns:
+            DataFrame с данными или None если файл не найден
+        """
+        path = Path(dataset_path)
+        
+        if not path.exists():
+            logger.warning(f"Файл датасета не найден: {dataset_path}")
+            return None
+        
+        try:
+            if path.suffix == '.csv':
+                df = pd.read_csv(path, parse_dates=['Date'])
+                if 'Date' in df.columns:
+                    df.set_index('Date', inplace=True)
+                logger.info(f"Загружен Kaggle датасет: {dataset_path}, {len(df)} записей")
+                return df
+            else:
+                logger.warning(f"Неподдерживаемый формат файла: {path.suffix}")
+                return None
+        except Exception as e:
+            logger.error(f"Ошибка загрузки датасета: {e}")
+            return None
+    
+    def merge_datasets(self, primary_df: pd.DataFrame, secondary_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Объединение двух датасетов с удалением дубликатов.
+        
+        Приоритет отдается primary_df. Данные из secondary_df добавляются
+        только для тех дат, которых нет в primary_df.
+        
+        Args:
+            primary_df: Основной датасет (приоритетный)
+            secondary_df: Дополнительный датасет
+        
+        Returns:
+            Объединенный DataFrame
+        """
+        if primary_df.empty:
+            return secondary_df.copy()
+        if secondary_df.empty:
+            return primary_df.copy()
+        
+        # Определяем даты которые есть только во вторичном датасете
+        primary_dates = set(primary_df.index)
+        secondary_dates = set(secondary_df.index)
+        new_dates = secondary_dates - primary_dates
+        
+        if not new_dates:
+            logger.info("Дублирование данных: все даты уже присутствуют в основном датасете")
+            return primary_df.copy()
+        
+        # Фильтруем вторичный датасет
+        secondary_new = secondary_df[secondary_df.index.isin(new_dates)]
+        
+        # Объединяем
+        merged = pd.concat([primary_df, secondary_new])
+        merged = merged.sort_index()
+        
+        logger.info(f"Объединено датасетов: {len(primary_df)} + {len(secondary_new)} = {len(merged)} записей")
+        return merged
 
 
 def main():
@@ -500,6 +625,12 @@ def main():
         default=None,
         help='Директория для сохранения данных'
     )
+    parser.add_argument(
+        '--kaggle-dataset',
+        type=str,
+        default=None,
+        help='Путь к Kaggle датасету для приоритетной загрузки'
+    )
     
     args = parser.parse_args()
     
@@ -521,14 +652,42 @@ def main():
     # Инициализация сборщика
     collector = MOEXDataCollector()
     
-    # Сбор данных по акциям
-    logger.info("\n=== Сбор данных по акциям ===")
-    price_data = collector.download_multiple_tickers(
+    # Попытка загрузки готового датасета (приоритет №1)
+    price_data = {}
+    if args.kaggle_dataset:
+        logger.info("\n=== Загрузка готового Kaggle датасета ===")
+        kaggle_df = collector.load_kaggle_dataset(args.kaggle_dataset)
+        if kaggle_df is not None:
+            # Разделяем по тикерам если есть колонка 'Ticker'
+            if 'Ticker' in kaggle_df.columns or 'ticker' in kaggle_df.columns:
+                ticker_col = 'Ticker' if 'Ticker' in kaggle_df.columns else 'ticker'
+                for ticker in tickers:
+                    ticker_df = kaggle_df[kaggle_df[ticker_col] == ticker].copy()
+                    if not ticker_df.empty:
+                        if 'Date' in ticker_df.columns:
+                            ticker_df.set_index('Date', inplace=True)
+                        price_data[ticker] = ticker_df
+                        logger.info(f"Загружен {ticker}: {len(ticker_df)} записей из Kaggle")
+            else:
+                # Если тикеров нет, считаем что это данные одного тикера
+                price_data[tickers[0]] = kaggle_df
+                logger.info(f"Загружены данные для {tickers[0]}: {len(kaggle_df)} записей из Kaggle")
+    
+    # Сбор данных по акциям из MOEX API (приоритет №2 - дополнение)
+    logger.info("\n=== Сбор данных по акциям (MOEX API) ===")
+    moex_data = collector.download_multiple_tickers(
         tickers=tickers,
         start_date=args.start_date,
         end_date=args.end_date,
         use_cache=not args.no_cache
     )
+    
+    # Объединяем датасеты с удалением дубликатов
+    for ticker in tickers:
+        if ticker in price_data and ticker in moex_data:
+            price_data[ticker] = collector.merge_datasets(price_data[ticker], moex_data[ticker])
+        elif ticker in moex_data and ticker not in price_data:
+            price_data[ticker] = moex_data[ticker]
     
     # Сбор макро-данных
     logger.info("\n=== Сбор макроэкономических данных ===")

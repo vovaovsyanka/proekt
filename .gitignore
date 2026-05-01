@@ -9,19 +9,30 @@ __pycache__/
 .venv/
 venv/
 env/
-pip-log.txt
-pip-selfcheck.json
+.env
+.env.local
+.env.*
 
 # Build artifacts
 build/
 dist/
 *.egg-info/
 
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
 # Logs
 *.log
 
-# Environment
-.env
-.env.local
-.env.*
+# Coverage
+.coverage
+coverage/
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
 ```

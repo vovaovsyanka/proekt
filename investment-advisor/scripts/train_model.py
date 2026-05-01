@@ -255,6 +255,10 @@ class FeatureEngine:
         # Расчет технических индикаторов
         df = self.calculate_technical_indicators(price_df)
         
+        if df.empty:
+            logger.warning(f"Пустой DataFrame после расчета индикаторов для {ticker}")
+            return pd.DataFrame()
+        
         # Добавление макро-факторов
         if macro_df is not None and not macro_df.empty:
             df = self.add_macro_features(df, macro_df)

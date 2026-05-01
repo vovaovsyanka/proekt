@@ -169,10 +169,24 @@ class MOEXDataCollector:
             return pd.DataFrame()
         
         # Получаем названия колонок из ответа
-        columns_map = {col['name']: col['id'] for col in data['candles']['columns']}
+        # MOEX API может возвращать columns как список словарей или список списков
+        columns_info = data['candles']['columns']
+        
+        # Проверяем формат columns
+        if isinstance(columns_info[0], dict):
+            # Формат: [{'name': 'begin', 'id': 0}, ...]
+            columns_map = {col['name']: col['id'] for col in columns_info}
+            column_names = [col['name'] for col in columns_info]
+        elif isinstance(columns_info[0], (list, tuple)):
+            # Формат: [['begin', 0], ['open', 1], ...]
+            columns_map = {col[0]: col[1] for col in columns_info}
+            column_names = [col[0] for col in columns_info]
+        else:
+            logger.error(f"Неизвестный формат колонок: {columns_info}")
+            return pd.DataFrame()
         
         # Создаем DataFrame
-        df = pd.DataFrame(all_data, columns=[col['name'] for col in data['candles']['columns']])
+        df = pd.DataFrame(all_data, columns=column_names)
         
         # Переименовываем колонки в стандартный формат
         rename_map = {

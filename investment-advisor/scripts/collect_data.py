@@ -1,14 +1,17 @@
 """
-Скрипт сбора данных с Московской Биржи (MOEX).
-Собирает исторические данные OHLCV, макроэкономические показатели и новости.
+Скрипт сбора данных для бота-трейдера.
+Собирает исторические данные OHLCV, макроэкономические показатели, новости и фундаментальные данные.
 
 Приоритет источников:
-1. Готовые датасеты (Kaggle, HuggingFace, GitHub) - основной источник
-2. MOEX ISS API - для дополнения и актуализации
-3. RSS ленты - для новостей
+1. Готовые датасеты (Kaggle, HuggingFace, GitHub) - основной источник исторических данных
+2. MOEX ISS API - для актуализации и дополнения
+3. API ЦБ РФ - для макроэкономических показателей
+4. RSS ленты - для новостей
 
 Использование:
     python scripts/collect_data.py --tickers SBER,GAZP,LKOH --start-date 2020-01-01 --end-date 2024-12-31
+
+Все данные сохраняются в data/raw/
 """
 import sys
 import argparse
@@ -16,9 +19,9 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import logging
 import json
-import hashlib
 import time
 import glob
+import xml.etree.ElementTree as ET
 
 # Добавляем корень проекта в path для импортов
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -55,6 +58,46 @@ NEWS_SOURCES = [
     }
 ]
 
+# Датасеты для загрузки
+DATASETS = {
+    'kaggle_stocks': {
+        'name': 'Russia Stocks Prices OHLCV',
+        'url': 'https://www.kaggle.com/datasets/olegshpagin/russia-stocks-prices-ohlcv',
+        'description': 'Данные по крупнейшим российским тикерам OHLCV',
+        'type': 'stocks'
+    },
+    'moex_dataset': {
+        'name': 'MOEX Dataset',
+        'url': 'https://github.com/foykes/moex-dataset',
+        'description': 'Данные по тикерам MOEX',
+        'type': 'stocks'
+    },
+    'russian_financial_news': {
+        'name': 'Russian Financial News',
+        'url': 'https://huggingface.co/datasets/Kasymkhan/RussianFinancialNews',
+        'description': 'Датасет с финансовыми новостями',
+        'type': 'news'
+    },
+    'financial_sentiment': {
+        'name': 'Financial News Sentiment',
+        'url': 'https://github.com/WebOfRussia/financial-news-sentiment',
+        'description': 'Набор данных для анализа тональности финансовых новостей',
+        'type': 'sentiment'
+    },
+    'rfsd': {
+        'name': 'RFSD - Russian Financial Statements Database',
+        'url': 'https://github.com/irlcode/RFSD',
+        'description': 'Российская база данных финансовой отчетности',
+        'type': 'fundamentals'
+    },
+    'kaggle_macro': {
+        'name': 'Russian Investment Activity',
+        'url': 'https://www.kaggle.com/datasets/demirtry/russian-investment-activity',
+        'description': 'Макроэкономические показатели: ставка ЦБ, инфляция, ВВП и др.',
+        'type': 'macro'
+    }
+}
+
 
 class MOEXDataCollector:
     """
@@ -66,9 +109,9 @@ class MOEXDataCollector:
     - RSS ленты для новостей
     """
     
-    def __init__(self, cache_dir: Optional[Path] = None):
-        self.cache_dir = cache_dir or settings.cache_dir
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, raw_data_dir: Optional[Path] = None):
+        self.raw_data_dir = raw_data_dir or settings.raw_data_dir
+        self.raw_data_dir.mkdir(parents=True, exist_ok=True)
         
         # Список российских тикеров по умолчанию
         self.default_tickers = [
@@ -98,44 +141,19 @@ class MOEXDataCollector:
             "SGZH"    # Сахалинская энергия
         ]
     
-    def _get_cache_key(self, ticker: str, start_date: str, end_date: str) -> str:
-        """Генерация уникального ключа для кэша."""
-        key_string = f"{ticker}_{start_date}_{end_date}"
-        return hashlib.md5(key_string.encode()).hexdigest()[:16]
-    
-    def _load_from_cache(self, cache_key: str) -> Optional[pd.DataFrame]:
-        """Загрузка данных из кэша."""
-        cache_file = self.cache_dir / f"{cache_key}.csv"
-        if cache_file.exists():
-            try:
-                df = pd.read_csv(cache_file, parse_dates=['Date'])
-                df.set_index('Date', inplace=True)
-                logger.info(f"Данные загружены из кэша: {cache_key}")
-                return df
-            except Exception as e:
-                logger.warning(f"Ошибка чтения кэша {cache_key}: {e}")
-        return None
-    
-    def _save_to_cache(self, df: pd.DataFrame, cache_key: str) -> None:
-        """Сохранение данных в кэш."""
-        cache_file = self.cache_dir / f"{cache_key}.csv"
-        try:
-            df_reset = df.reset_index()
-            if 'Date' in df_reset.columns:
-                if hasattr(df_reset['Date'].dt, 'tz') and df_reset['Date'].dt.tz is not None:
-                    df_reset['Date'] = df_reset['Date'].dt.tz_convert('UTC').dt.tz_localize(None)
-            df_reset.to_csv(cache_file, index=False)
-            logger.info(f"Данные сохранены в кэш: {cache_key}")
-        except Exception as e:
-            logger.warning(f"Ошибка записи в кэш {cache_key}: {e}")
+    def save_dataframe(self, df: pd.DataFrame, filename: str) -> Path:
+        """Сохранение DataFrame в CSV файл."""
+        filepath = self.raw_data_dir / filename
+        df.to_csv(filepath, index=True)
+        logger.info(f"Данные сохранены в {filepath}")
+        return filepath
     
     def get_moex_candles(
         self, 
         ticker: str, 
         start_date: str, 
         end_date: str,
-        interval: int = 24,
-        use_cache: bool = True
+        interval: int = 24
     ) -> pd.DataFrame:
         """
         Загружает исторические свечи (OHLCV) с MOEX ISS API.
@@ -145,18 +163,10 @@ class MOEXDataCollector:
             start_date: Дата начала в формате YYYY-MM-DD
             end_date: Дата окончания в формате YYYY-MM-DD
             interval: 24 (день), 60 (час), 10 (10 минут), 1 (1 минута)
-            use_cache: Использовать ли кэш
         
         Returns:
             DataFrame с колонками: open, high, low, close, volume
         """
-        cache_key = self._get_cache_key(ticker, start_date, end_date)
-        
-        if use_cache:
-            cached_data = self._load_from_cache(cache_key)
-            if cached_data is not None:
-                return cached_data
-        
         url = f'https://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json'
         params = {
             'from': start_date,
@@ -195,21 +205,14 @@ class MOEXDataCollector:
             return pd.DataFrame()
         
         # Получаем названия колонок из ответа
-        # MOEX API может возвращать columns как:
-        # 1. Список словарей: [{'name': 'begin', 'id': 0}, ...]
-        # 2. Список кортежей/списков: [['begin', 0], ['open', 1], ...]
-        # 3. Простой список строк: ['open', 'close', 'high', ...] - текущий формат MOEX
         columns_info = data['candles']['columns']
         
         # Проверяем формат columns
         if isinstance(columns_info[0], dict):
-            # Формат: [{'name': 'begin', 'id': 0}, ...]
             column_names = [col['name'] for col in columns_info]
         elif isinstance(columns_info[0], (list, tuple)):
-            # Формат: [['begin', 0], ['open', 1], ...]
             column_names = [col[0] for col in columns_info]
         elif isinstance(columns_info[0], str):
-            # Формат: ['open', 'close', 'high', 'low', 'value', 'volume', 'begin', 'end']
             column_names = columns_info
         else:
             logger.error(f"Неизвестный формат колонок: {columns_info}")
@@ -241,11 +244,6 @@ class MOEXDataCollector:
         
         if available_cols:
             df = df[available_cols]
-            
-            # Сохраняем в кэш
-            if use_cache:
-                self._save_to_cache(df, cache_key)
-            
             logger.info(f"Загружено {len(df)} записей для {ticker}")
             return df
         else:
@@ -256,8 +254,7 @@ class MOEXDataCollector:
         self,
         ticker: str,
         start_date: str,
-        end_date: str,
-        use_cache: bool = True
+        end_date: str
     ) -> pd.DataFrame:
         """
         Обёртка над get_moex_candles для совместимости с data_loader.
@@ -266,7 +263,6 @@ class MOEXDataCollector:
             ticker: Тикер акции (например, 'SBER')
             start_date: Дата начала в формате YYYY-MM-DD
             end_date: Дата окончания в формате YYYY-MM-DD
-            use_cache: Использовать ли кэш
             
         Returns:
             DataFrame с колонками: open, high, low, close, volume
@@ -275,16 +271,14 @@ class MOEXDataCollector:
             ticker=ticker,
             start_date=start_date,
             end_date=end_date,
-            interval=24,  # дневные свечи
-            use_cache=use_cache
+            interval=24  # дневные свечи
         )
     
     def download_multiple_tickers(
         self,
         tickers: List[str],
         start_date: str,
-        end_date: str,
-        use_cache: bool = True
+        end_date: str
     ) -> Dict[str, pd.DataFrame]:
         """
         Загрузка данных по нескольким тикерам.
@@ -293,7 +287,6 @@ class MOEXDataCollector:
             tickers: Список тикеров
             start_date: Дата начала
             end_date: Дата окончания
-            use_cache: Использовать ли кэш
         
         Returns:
             Словарь {ticker: DataFrame}
@@ -303,7 +296,7 @@ class MOEXDataCollector:
         
         for i, ticker in enumerate(tickers, 1):
             logger.info(f"[{i}/{total}] Загрузка {ticker}...")
-            df = self.get_moex_candles(ticker, start_date, end_date, use_cache=use_cache)
+            df = self.get_moex_candles(ticker, start_date, end_date)
             if not df.empty:
                 result[ticker] = df
             
@@ -314,17 +307,55 @@ class MOEXDataCollector:
         logger.info(f"Успешно загружены данные для {len(result)}/{total} тикеров")
         return result
     
+    def get_macro_data_from_cbr(
+        self,
+        series_id: str,
+        start_date: str,
+        end_date: str
+    ) -> pd.DataFrame:
+        """
+        Загружает макроэкономические данные из API Банка России.
+        
+        Args:
+            series_id - идентификатор ряда (например, 'RU_CPI_M' для инфляции)
+        
+        Returns:
+            DataFrame с колонками date и value
+        """
+        url = f'https://www.cbr.ru/statistics/data-service/api/v1/data/{series_id}'
+        params = {
+            'from': start_date,
+            'to': end_date
+        }
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+            data = []
+            for obs in root.findall('.//Obs'):
+                data.append({
+                    'date': obs.get('TIME_PERIOD'),
+                    'value': obs.get('OBS_VALUE')
+                })
+            df = pd.DataFrame(data)
+            if not df.empty:
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+            return df
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки данных ЦБ РФ ({series_id}): {e}")
+            return pd.DataFrame()
+    
     def get_macro_data(
         self,
         start_date: str,
         end_date: str
     ) -> pd.DataFrame:
         """
-        Загрузка макроэкономических показателей РФ.
+        Загрузка макроэкономических показателей РФ из реальных источников.
         
         Источники:
-        - API Банка России (ключевая ставка)
-        - Росстат (инфляция, ВВП)
+        - API Банка России (ключевая ставка, курсы валют)
         
         Args:
             start_date: Дата начала
@@ -342,120 +373,39 @@ class MOEXDataCollector:
         macro_data = {'date': dates}
         
         # === Ключевая ставка ЦБ РФ ===
-        # Реальные значения ставки (примерные, для демонстрации)
-        # В продакшене нужно парсить с cbr.ru
-        key_rate_history = {
-            '2020-01-01': 7.75,
-            '2020-04-01': 5.50,
-            '2020-07-01': 4.25,
-            '2021-03-01': 4.50,
-            '2021-06-01': 5.50,
-            '2021-10-01': 7.50,
-            '2021-12-01': 8.50,
-            '2022-02-28': 20.0,
-            '2022-04-11': 17.0,
-            '2022-05-27': 11.0,
-            '2022-07-25': 8.0,
-            '2022-09-19': 7.5,
-            '2023-07-21': 8.5,
-            '2023-09-15': 13.0,
-            '2023-10-30': 15.0,
-            '2023-12-15': 16.0,
-            '2024-07-26': 18.0,
-            '2024-09-13': 19.0,
-        }
-        
-        # Интерполяция ставки по датам
-        rate_dates = pd.to_datetime(list(key_rate_history.keys()))
-        rate_values = list(key_rate_history.values())
-        
-        # Создаем Series с ставкой
-        rate_series = pd.Series(rate_values, index=rate_dates)
-        
-        # Приводим к нашим датам с forward fill
-        rate_df = pd.DataFrame({'key_rate': rate_series})
-        rate_df = rate_df.reindex(pd.date_range(start=min(rate_dates), end=end_date, freq='D'))
-        rate_df['key_rate'] = rate_df['key_rate'].ffill()
-        
-        # Берем только бизнес-дни
-        macro_data['key_rate'] = rate_df.loc[start_date:end_date].reindex(dates)['key_rate'].values
-        
-        # === Инфляция (ИПЦ, % г/г) ===
-        # Примерные значения
-        inflation_data = {
-            '2020-01-01': 2.4,
-            '2020-07-01': 3.2,
-            '2021-01-01': 4.9,
-            '2021-07-01': 6.5,
-            '2022-01-01': 8.7,
-            '2022-04-01': 17.8,
-            '2022-07-01': 15.1,
-            '2023-01-01': 11.8,
-            '2023-07-01': 4.3,
-            '2024-01-01': 7.4,
-            '2024-07-01': 8.9,
-        }
-        
-        inf_dates = pd.to_datetime(list(inflation_data.keys()))
-        inf_values = list(inflation_data.values())
-        inf_series = pd.Series(inf_values, index=inf_dates)
-        
-        inf_df = pd.DataFrame({'inflation': inf_series})
-        inf_df = inf_df.reindex(pd.date_range(start=min(inf_dates), end=end_date, freq='D'))
-        inf_df['inflation'] = inf_df['inflation'].ffill()
-        
-        macro_data['inflation'] = inf_df.loc[start_date:end_date].reindex(dates)['inflation'].values
+        # Загружаем реальные данные с API ЦБ РФ
+        key_rate_df = self.get_macro_data_from_cbr('RU_KEY_RATE', start_date, end_date)
+        if not key_rate_df.empty:
+            key_rate_df = key_rate_df.reindex(pd.date_range(start=start_date, end=end_date, freq='D'))
+            key_rate_df['key_rate'] = key_rate_df['value'].ffill()
+            macro_data['key_rate'] = key_rate_df.reindex(dates)['key_rate'].values
+        else:
+            logger.warning("Не удалось загрузить ключевую ставку, используем значения по умолчанию")
+            macro_data['key_rate'] = np.nan
         
         # === Курс USD/RUB ===
-        # Можно брать с cbr.ru или moex
-        usd_rub_data = {
-            '2020-01-01': 62.0,
-            '2020-03-01': 74.0,
-            '2020-12-01': 73.0,
-            '2021-12-01': 74.0,
-            '2022-02-24': 84.0,
-            '2022-03-01': 115.0,
-            '2022-06-01': 57.0,
-            '2022-12-01': 70.0,
-            '2023-06-01': 85.0,
-            '2023-12-01': 90.0,
-            '2024-06-01': 88.0,
-            '2024-09-01': 92.0,
-        }
+        usd_rub_df = self.get_macro_data_from_cbr('RU_USDRUSD', start_date, end_date)
+        if not usd_rub_df.empty:
+            usd_rub_df = usd_rub_df.reindex(pd.date_range(start=start_date, end=end_date, freq='D'))
+            usd_rub_df['usd_rub'] = usd_rub_df['value'].ffill()
+            macro_data['usd_rub'] = usd_rub_df.reindex(dates)['usd_rub'].values
+        else:
+            logger.warning("Не удалось загрузить курс USD/RUB")
+            macro_data['usd_rub'] = np.nan
         
-        usd_dates = pd.to_datetime(list(usd_rub_data.keys()))
-        usd_values = list(usd_rub_data.values())
-        usd_series = pd.Series(usd_values, index=usd_dates)
+        # === Инфляция (ИПЦ, % г/г) ===
+        inflation_df = self.get_macro_data_from_cbr('RU_CPI_M', start_date, end_date)
+        if not inflation_df.empty:
+            inflation_df = inflation_df.reindex(pd.date_range(start=start_date, end=end_date, freq='D'))
+            inflation_df['inflation'] = inflation_df['value'].ffill()
+            macro_data['inflation'] = inflation_df.reindex(dates)['inflation'].values
+        else:
+            logger.warning("Не удалось загрузить инфляцию")
+            macro_data['inflation'] = np.nan
         
-        usd_df = pd.DataFrame({'usd_rub': usd_series})
-        usd_df = usd_df.reindex(pd.date_range(start=min(usd_dates), end=end_date, freq='D'))
-        usd_df['usd_rub'] = usd_df['usd_rub'].ffill()
-        
-        macro_data['usd_rub'] = usd_df.loc[start_date:end_date].reindex(dates)['usd_rub'].values
-        
-        # === Brent crude oil price ($/barrel) ===
-        oil_data = {
-            '2020-01-01': 68.0,
-            '2020-04-01': 25.0,
-            '2020-12-01': 51.0,
-            '2021-12-01': 75.0,
-            '2022-03-01': 110.0,
-            '2022-12-01': 85.0,
-            '2023-06-01': 75.0,
-            '2023-12-01': 77.0,
-            '2024-06-01': 82.0,
-            '2024-09-01': 73.0,
-        }
-        
-        oil_dates = pd.to_datetime(list(oil_data.keys()))
-        oil_values = list(oil_data.values())
-        oil_series = pd.Series(oil_values, index=oil_dates)
-        
-        oil_df = pd.DataFrame({'brent': oil_series})
-        oil_df = oil_df.reindex(pd.date_range(start=min(oil_dates), end=end_date, freq='D'))
-        oil_df['brent'] = oil_df['brent'].ffill()
-        
-        macro_data['brent'] = oil_df.loc[start_date:end_date].reindex(dates)['brent'].values
+        # === Brent crude oil price ===
+        # API ЦБ может не иметь прямых данных по нефти, оставляем NaN или можно добавить другой источник
+        macro_data['brent'] = np.nan
         
         # Создаем DataFrame
         macro_df = pd.DataFrame(macro_data)
@@ -705,8 +655,7 @@ def main():
     moex_data = collector.download_multiple_tickers(
         tickers=tickers,
         start_date=args.start_date,
-        end_date=args.end_date,
-        use_cache=not args.no_cache
+        end_date=args.end_date
     )
     
     # Объединяем датасеты с удалением дубликатов

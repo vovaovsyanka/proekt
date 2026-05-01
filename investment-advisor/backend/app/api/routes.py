@@ -317,9 +317,9 @@ async def get_recommendations(
     Получить рекомендации по портфелю пользователя.
     
     Анализирует каждый тикер из портфеля используя:
-    - Технические индикаторы (RSI, MACD, SMA и др.)
-    - ML модель (CatBoost)
-    - Прогнозы временных рядов (Prophet features)
+    - Технические индикаторы (RSI, MACD, SMA, Stochastic, ADX и др.)
+    - Ансамбль ML моделей (LightGBM + GradientBoosting + RandomForest + LogisticRegression)
+    - Сентимент-анализ новостей через FinBERT
     - Макроэкономические факторы
     
     Возвращает рекомендации BUY/SELL/HOLD с обоснованием.

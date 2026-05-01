@@ -351,7 +351,8 @@ class FeatureEngine:
         ticker: str,
         price_df: pd.DataFrame,
         macro_df: pd.DataFrame,
-        horizon: int = 1
+        horizon: int = 1,
+        news_df: pd.DataFrame = None
     ) -> pd.DataFrame:
         """Полный пайплайн обработки данных для одного тикера."""
         logger.info(f"Обработка данных для {ticker}")
@@ -366,6 +367,10 @@ class FeatureEngine:
         # Добавление макро-факторов
         if macro_df is not None and not macro_df.empty:
             df = self.add_macro_features(df, macro_df)
+        
+        # Добавление сентимента из новостей
+        if news_df is not None and not news_df.empty:
+            df = self.add_news_sentiment_features(df, news_df, ticker)
         
         # Создание таргета
         df = self.create_target(df, horizon)
@@ -417,7 +422,8 @@ def create_panel_data(
     ticker_data_dict: dict,
     macro_df: pd.DataFrame,
     horizon: int = 1,
-    feature_engine: FeatureEngine = None
+    feature_engine: FeatureEngine = None,
+    news_df: pd.DataFrame = None
 ) -> pd.DataFrame:
     """Создание панельных данных из нескольких тикеров."""
     logger.info(f"Создание панельных данных для {len(ticker_data_dict)} тикеров")
@@ -433,7 +439,8 @@ def create_panel_data(
                 ticker=ticker,
                 price_df=price_df,
                 macro_df=macro_df,
-                horizon=horizon
+                horizon=horizon,
+                news_df=news_df
             )
             if not processed.empty:
                 all_data.append(processed)
@@ -516,37 +523,84 @@ def train_model(
     X_val: pd.DataFrame,
     y_val: pd.Series,
     feature_columns: list
-) -> CatBoostClassifier:
-    """Обучение модели CatBoost с early stopping."""
-    logger.info("=== Этап 4: Обучение модели CatBoost ===")
+):
+    """Обучение ансамбля моделей: LightGBM + GradientBoosting + RandomForest + LogisticRegression."""
+    logger.info("=== Этап 4: Обучение ансамбля моделей ===")
     
-    # Параметры модели CatBoost
-    model = CatBoostClassifier(
-        iterations=1000,
+    # Модель 1: LightGBM (основная)
+    logger.info("Обучение LightGBM...")
+    lgb_model = lgb.LGBMClassifier(
+        n_estimators=500,
         learning_rate=0.05,
-        depth=6,
-        l2_leaf_reg=3,
-        loss_function='Logloss',
-        eval_metric='AUC',
-        early_stopping_rounds=50,
-        random_seed=42,
-        verbose=100
+        max_depth=6,
+        num_leaves=31,
+        min_child_samples=20,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=42,
+        verbose=-1
+    )
+    lgb_model.fit(X_train, y_train)
+    
+    # Модель 2: Gradient Boosting
+    logger.info("Обучение GradientBoosting...")
+    gb_model = GradientBoostingClassifier(
+        n_estimators=300,
+        learning_rate=0.05,
+        max_depth=5,
+        min_samples_split=20,
+        min_samples_leaf=10,
+        subsample=0.8,
+        random_state=42
+    )
+    gb_model.fit(X_train, y_train)
+    
+    # Модель 3: Random Forest
+    logger.info("Обучение RandomForest...")
+    rf_model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=10,
+        min_samples_split=20,
+        min_samples_leaf=10,
+        max_features='sqrt',
+        random_state=42,
+        n_jobs=-1
+    )
+    rf_model.fit(X_train, y_train)
+    
+    # Модель 4: Logistic Regression с калибровкой
+    logger.info("Обучение LogisticRegression...")
+    lr_base = LogisticRegression(
+        max_iter=1000,
+        random_state=42,
+        C=0.1
+    )
+    lr_model = CalibratedClassifierCV(lr_base, method='sigmoid', cv=3)
+    lr_model.fit(X_train, y_train)
+    
+    # Создаем ансамбль с весами
+    logger.info("Создание VotingClassifier...")
+    ensemble = VotingClassifier(
+        estimators=[
+            ('lgb', lgb_model),
+            ('gb', gb_model),
+            ('rf', rf_model),
+            ('lr', lr_model)
+        ],
+        voting='soft',
+        weights=[3, 2, 2, 1]  # LightGBM имеет наибольший вес
     )
     
-    # Обучение с early stopping
-    model.fit(
-        X_train, y_train,
-        eval_set=(X_val, y_val),
-        use_best_model=True
-    )
+    # Финальное обучение ансамбля
+    ensemble.fit(X_train, y_train)
     
-    logger.info(f"Обучение завершено. Использовано {model.tree_count_} деревьев")
+    logger.info("Обучение ансамбля завершено")
     
-    return model
+    return ensemble
 
 
 def evaluate_model(
-    model: CatBoostClassifier,
+    model,
     X_test: pd.DataFrame,
     y_test: pd.Series,
     feature_columns: list
@@ -576,8 +630,28 @@ def evaluate_model(
     logger.info("\nClassification Report:")
     logger.info(classification_report(y_test, y_pred, target_names=['DOWN', 'UP']))
     
-    # Feature importance
-    feature_importance = dict(zip(feature_columns, model.feature_importances_.tolist()))
+    # Feature importance (для ансамбля берем среднее по моделям)
+    if hasattr(model, 'named_estimators_'):
+        # Собираем важность признаков из всех моделей
+        importances = []
+        for name, est in model.named_estimators_.items():
+            if hasattr(est, 'feature_importances_'):
+                importances.append(est.feature_importances_)
+            elif hasattr(est, 'calibrated_classifiers_'):
+                # Для CalibratedClassifierCV берем важность базовой модели
+                for cal_clf in est.calibrated_classifiers_:
+                    if hasattr(cal_clf.estimator_, 'coef_'):
+                        importances.append(np.abs(cal_clf.estimator_.coef_[0]))
+        
+        if importances:
+            # Усредняем важность признаков
+            avg_importance = np.mean(importances, axis=0)
+            feature_importance = dict(zip(feature_columns, avg_importance.tolist()))
+        else:
+            feature_importance = {feat: 1.0/len(feature_columns) for feat in feature_columns}
+    else:
+        feature_importance = {feat: 1.0/len(feature_columns) for feat in feature_columns}
+    
     sorted_importance = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
     
     logger.info("\nТоп-10 важных признаков:")
@@ -588,7 +662,7 @@ def evaluate_model(
 
 
 def save_model(
-    model: CatBoostClassifier,
+    model,
     feature_columns: list,
     feature_importance: dict,
     metrics: dict,
@@ -601,10 +675,10 @@ def save_model(
     model_dir = Path(__file__).parent.parent / "backend" / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
     
-    model_path = model_dir / "catboost_portfolio.cbm"
+    model_path = model_dir / "ensemble_portfolio.pkl"
     
-    # Сохраняем модель в нативном формате CatBoost
-    model.save_model(str(model_path))
+    # Сохраняем ансамбль через joblib
+    joblib.dump(model, str(model_path))
     logger.info(f"Модель сохранена в {model_path}")
     
     # Сохраняем метаданные отдельно
@@ -616,7 +690,8 @@ def save_model(
         'config': {
             'tickers': tickers,
             'train_period': '2019-01-01 - 2021-12-31',
-            'prediction_horizon': 1
+            'prediction_horizon': 1,
+            'model_type': 'VotingClassifier (LightGBM + GradientBoosting + RandomForest + LogisticRegression)'
         }
     }
     
@@ -688,11 +763,11 @@ def main():
     
     try:
         # Этап 1: Загрузка данных
-        price_data, macro_df = load_and_prepare_data(tickers, "2018-01-01", args.end_date)
+        price_data, macro_df, news_df = load_and_prepare_data(tickers, "2018-01-01", args.end_date)
         
         # Этап 2: Создание признаков
         feature_engine = FeatureEngine()
-        panel_df = create_panel_data(price_data, macro_df, horizon=1, feature_engine=feature_engine)
+        panel_df = create_panel_data(price_data, macro_df, horizon=1, feature_engine=feature_engine, news_df=news_df)
         
         if panel_df.empty:
             raise ValueError("Панельный DataFrame пуст после обработки")

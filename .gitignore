@@ -4,52 +4,57 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.py~
-*.py.class
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Data cache and models
-data/cache/
-investment-advisor/models/
-
-# Virtual environments
+env/
 venv/
 .venv/
-env/
-ENV/
-.ENV/
-env.bak/
-venv.bak/
+.venv*/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.DS_Store
+Thumbs.db
 
-# IDE and editor files
+# Environment
+.env
+.env.local
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+julia-*/
+zig*/
+
+# Build and distribution artifacts
+dist/
+build/
+*.egg-info/
+.eggs/
+.installed.cfg
+lib/
+lib64/
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *.tmp
-*.log
 
-# OS generated files
+# OS
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
 ```

@@ -1,7 +1,5 @@
 """
 ML Pipeline: обучение модели на исторических данных.
-Использует CatBoost вместо LightGBM для лучшей работы с категориальными признаками.
-Также включает прогнозирование временных рядов через Prophet.
 
 Приоритет источников данных:
 1. Локальные датасеты из /workspace/data/raw/ (Kaggle и другие источники)
@@ -24,13 +22,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 import numpy as np
-from catboost import CatBoostClassifier, Pool
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.preprocessing import StandardScaler
 import joblib
+import lightgbm as lgb
 
 from backend.config import settings
 from scripts.collect_data import MOEXDataCollector
@@ -52,12 +51,38 @@ RAW_DATA_DIR = DATA_ROOT / "raw"
 FEATURES_DIR = DATA_ROOT / "features"
 
 
+def load_kaggle_dataset(filepath: str) -> pd.DataFrame:
+    """
+    Загрузка датасета с Kaggle или другого локального источника.
+    
+    Args:
+        filepath: Путь к CSV файлу
+        
+    Returns:
+        DataFrame с данными
+    """
+    if not os.path.exists(filepath):
+        logger.warning(f"Файл не найден: {filepath}")
+        return pd.DataFrame()
+    
+    try:
+        df = pd.read_csv(filepath, parse_dates=['Date', 'date'], dayfirst=False)
+        # Нормализация имен колонок
+        df.columns = df.columns.str.lower().str.strip()
+        logger.info(f"Загружено {len(df)} записей из {filepath}")
+        return df
+    except Exception as e:
+        logger.error(f"Ошибка загрузки файла {filepath}: {e}")
+        return pd.DataFrame()
+
+
 def load_and_prepare_data(tickers: list, start_date: str, end_date: str) -> tuple:
     """
     Загрузка и подготовка данных для обучения.
+    Приоритет: локальные датасеты -> API
     
     Returns:
-        Кортеж (panel_df, macro_df) с панельными данными и макро-факторами
+        Кортеж (panel_df, macro_df, news_df) с панельными данными, макро-факторами и новостями
     """
     logger.info("=== Этап 1: Загрузка данных ===")
     
@@ -66,15 +91,43 @@ def load_and_prepare_data(tickers: list, start_date: str, end_date: str) -> tupl
     
     logger.info(f"Загрузка данных для {len(tickers)} тикеров: {tickers[:5]}...")
     
-    # Загружаем данные за период обучения + немного раньше для расчета индикаторов
-    train_start = "2018-01-01"  # Начинаем раньше для расчета SMA200
+    # Пробуем загрузить из локальных датасетов Kaggle
+    price_data = {}
     
-    price_data = collector.download_multiple_tickers(
-        tickers=tickers,
-        start_date=train_start,
-        end_date=end_date,
-        use_cache=True
-    )
+    # Проверяем наличие Kaggle датасета Russia Stocks Prices
+    kaggle_file = RAW_DATA_DIR / "russia_stocks_ohlcv.csv"
+    if kaggle_file.exists():
+        logger.info(f"Найден Kaggle датасет: {kaggle_file}")
+        kaggle_df = load_kaggle_dataset(str(kaggle_file))
+        
+        if not kaggle_df.empty:
+            # Группируем данные по тикерам
+            for ticker in tickers:
+                ticker_data = kaggle_df[kaggle_df['ticker'].str.upper() == ticker].copy()
+                if not ticker_data.empty:
+                    # Приводим к нужному формату
+                    ticker_data = ticker_data.rename(columns={
+                        'open': 'open', 'high': 'high', 'low': 'low', 
+                        'close': 'close', 'volume': 'volume'
+                    })
+                    if 'Date' not in ticker_data.columns and 'date' in ticker_data.columns:
+                        ticker_data['Date'] = ticker_data['date']
+                    ticker_data.set_index('Date', inplace=True)
+                    price_data[ticker] = ticker_data[['open', 'high', 'low', 'close', 'volume']]
+                    logger.info(f"Загружен Kaggle датасет для {ticker}: {len(price_data[ticker])} записей")
+    
+    # Дополняем данные из API для тех тикеров, которых нет в Kaggle
+    missing_tickers = [t for t in tickers if t not in price_data]
+    if missing_tickers:
+        logger.info(f"Дозагрузка {len(missing_tickers)} тикеров из MOEX API...")
+        train_start = "2018-01-01"
+        api_data = collector.download_multiple_tickers(
+            tickers=missing_tickers,
+            start_date=train_start,
+            end_date=end_date,
+            use_cache=True
+        )
+        price_data.update(api_data)
     
     if not price_data:
         raise ValueError("Не удалось загрузить данные ни для одного тикера")
@@ -82,21 +135,44 @@ def load_and_prepare_data(tickers: list, start_date: str, end_date: str) -> tupl
     logger.info(f"Успешно загружены данные для {len(price_data)} тикеров")
     
     # Загружаем макро-данные
-    macro_df = collector.get_macro_data(train_start, end_date)
+    macro_df = collector.get_macro_data("2018-01-01", end_date)
     
-    return price_data, macro_df
+    # Загружаем новости для анализа сентимента
+    news_df = load_news_data()
+    
+    return price_data, macro_df, news_df
+
+
+def load_news_data() -> pd.DataFrame:
+    """
+    Загрузка данных новостей из локального файла.
+    
+    Returns:
+        DataFrame с новостями
+    """
+    news_file = FEATURES_DIR / "rbk_news.csv"
+    if news_file.exists():
+        try:
+            df = pd.read_csv(news_file, parse_dates=['published'])
+            logger.info(f"Загружено {len(df)} новостей")
+            
+            # Нормализация колонок
+            if 'title' in df.columns:
+                df = df.rename(columns={'published': 'published_at', 'title': 'title'})
+                # Добавляем пустую колонку ticker (будет заполняться при анализе)
+                if 'ticker' not in df.columns:
+                    df['ticker'] = ''
+            
+            return df
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки новостей: {e}")
+    
+    return pd.DataFrame()
 
 
 def calculate_prophet_forecast(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     """
     Расчет прогноза временного ряда через Prophet для использования как фичи.
-    
-    Args:
-        df: DataFrame с ценами (должен иметь колонку 'close' и DatetimeIndex)
-        ticker: Тикер акции
-        
-    Returns:
-        DataFrame с прогнозными значениями
     """
     try:
         from prophet import Prophet
@@ -155,6 +231,8 @@ class FeatureEngine:
         self.macd_slow = 26
         self.macd_signal = 9
         self.atr_period = 14
+        self.bollinger_period = 20
+        self.bollinger_std = 2
     
     def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Расчет всех технических индикаторов."""
@@ -201,11 +279,20 @@ class FeatureEngine:
         true_range = np.max(ranges, axis=1)
         df['atr'] = true_range.rolling(self.atr_period).mean()
         
+        # Полосы Боллинджера
+        df['bb_middle'] = df['close'].rolling(window=self.bollinger_period).mean()
+        bb_std = df['close'].rolling(window=self.bollinger_period).std()
+        df['bb_upper'] = df['bb_middle'] + (bb_std * self.bollinger_std)
+        df['bb_lower'] = df['bb_middle'] - (bb_std * self.bollinger_std)
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+        df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+        
         # Логарифмическая доходность
         df['log_return'] = np.log(df['close'] / df['close'].shift(1))
         
         # Объемные соотношения
         df['volume_ratio'] = df['volume'] / df['volume'].rolling(window=20).mean()
+        df['volume_ma_ratio'] = df['volume'] / df['volume'].rolling(window=50).mean()
         
         # Отклонение цены от SMA
         df['price_sma20_deviation'] = (df['close'] - df['sma_20']) / df['sma_20']
@@ -217,8 +304,48 @@ class FeatureEngine:
         
         # Волатильность
         df['volatility_20d'] = df['log_return'].rolling(window=20).std()
+        df['volatility_60d'] = df['log_return'].rolling(window=60).std()
+        
+        # Моментум
+        df['momentum_10d'] = df['close'] / df['close'].shift(10) - 1
+        df['momentum_20d'] = df['close'] / df['close'].shift(20) - 1
+        
+        # Стохастик
+        low_min = df['low'].rolling(window=14).min()
+        high_max = df['high'].rolling(window=14).max()
+        df['stochastic_k'] = 100 * (df['close'] - low_min) / (high_max - low_min)
+        df['stochastic_d'] = df['stochastic_k'].rolling(window=3).mean()
+        
+        # ADX (трендовый индекс)
+        df['adx'] = self._calculate_adx(df)
+        
+        # Обработка разрывов (gaps)
+        df['gap'] = (df['open'] - df['close'].shift()) / df['close'].shift()
         
         return df
+    
+    def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Расчет Average Directional Index."""
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        
+        plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+        minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+        
+        tr = np.maximum(high - low, np.maximum(abs(high - close.shift()), abs(low - close.shift())))
+        tr_smooth = pd.Series(tr).rolling(window=period).sum()
+        
+        plus_di = 100 * pd.Series(plus_dm).rolling(window=period).sum() / tr_smooth
+        minus_di = 100 * pd.Series(minus_dm).rolling(window=period).sum() / tr_smooth
+        
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.rolling(window=period).mean()
+        
+        return adx
     
     def add_macro_features(self, df: pd.DataFrame, macro_df: pd.DataFrame) -> pd.DataFrame:
         """Добавление макроэкономических факторов."""
@@ -235,6 +362,120 @@ class FeatureEngine:
         for col in macro_cols:
             if col in df.columns:
                 df[col] = df[col].ffill()
+        
+        # Добавляем изменения макро показателей
+        for col in macro_cols:
+            if col in df.columns:
+                df[f'{col}_change'] = df[col].diff()
+        
+        return df
+    
+    def add_news_features(self, df: pd.DataFrame, news_df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+        """
+        Добавление признаков из новостей с использованием NLP сентимента.
+        Анализирует все новости за период и агрегирует сентимент по дням.
+        """
+        if df.empty or news_df.empty:
+            return df
+        
+        df = df.copy()
+        
+        # Фильтруем новости по тикеру (если есть привязка) или берем все общие финансовые новости
+        if 'ticker' in news_df.columns and not news_df['ticker'].isna().all():
+            ticker_news = news_df[news_df['ticker'].str.upper() == ticker].copy()
+        else:
+            # Если нет привязки к тику, используем все новости как общий рыночный сентимент
+            ticker_news = news_df.copy()
+        
+        if ticker_news.empty:
+            # Если новостей нет, добавляем нулевые признаки
+            df['news_sentiment'] = 0.0
+            df['news_count_7d'] = 0
+            df['news_sentiment_7d'] = 0.0
+            return df
+        
+        # Анализируем сентимент заголовков
+        try:
+            from transformers import pipeline
+            
+            # Загружаем модель для анализа тональности (кэшируется после первой загрузки)
+            logger.info(f"Загрузка FinBERT модели для анализа новостей...")
+            sentiment_pipeline = pipeline(
+                "sentiment-analysis",
+                model="ProsusAI/finbert",
+                truncation=True,
+                max_length=512,
+                device=-1  # CPU
+            )
+            
+            # Получаем сентимент для каждой новости
+            sentiments = []
+            for idx, row in ticker_news.iterrows():
+                text = row.get('title', '')
+                if text and isinstance(text, str):
+                    try:
+                        result = sentiment_pipeline(text)[0]
+                        label = result['label'].lower()
+                        score = result['score']
+                        
+                        # Конвертируем в числовой скор: positive=+score, neutral=0, negative=-score
+                        if label == 'positive':
+                            sent_score = score
+                        elif label == 'negative':
+                            sent_score = -score
+                        else:
+                            sent_score = 0
+                        
+                        pub_date = row.get('published_at')
+                        if pub_date:
+                            sentiments.append({
+                                'date': pd.to_datetime(pub_date),
+                                'sentiment': sent_score
+                            })
+                    except Exception as e:
+                        logger.debug(f"Ошибка анализа новости: {e}")
+                        continue
+            
+            if sentiments:
+                sentiment_df = pd.DataFrame(sentiments)
+                sentiment_df.set_index('date', inplace=True)
+                
+                # Агрегируем сентимент по дням
+                daily_sentiment = sentiment_df.groupby(sentiment_df.index.date)['sentiment'].mean()
+                daily_sentiment.index = pd.to_datetime(daily_sentiment.index)
+                
+                # Количество новостей за последние 7 дней
+                news_count_7d = sentiment_df.resample('D').count()['sentiment'].rolling(7).sum()
+                
+                # Средний сентимент за последние 7 дней
+                sentiment_7d = sentiment_df.resample('D')['sentiment'].mean().rolling(7).mean()
+                
+                # Объединяем с основными данными
+                df = df.join(daily_sentiment.rename('news_sentiment'), how='left')
+                df = df.join(news_count_7d.rename('news_count_7d'), how='left')
+                df = df.join(sentiment_7d.rename('news_sentiment_7d'), how='left')
+                
+                # Заполняем пропуски
+                df['news_sentiment'] = df['news_sentiment'].fillna(0)
+                df['news_count_7d'] = df['news_count_7d'].fillna(0)
+                df['news_sentiment_7d'] = df['news_sentiment_7d'].fillna(0)
+                
+                logger.info(f"Добавлены новостные признаки для {ticker}: {len(sentiments)} новостей проанализировано")
+            else:
+                df['news_sentiment'] = 0.0
+                df['news_count_7d'] = 0
+                df['news_sentiment_7d'] = 0.0
+                
+        except ImportError:
+            logger.warning("transformers не установлен, пропускаем анализ новостей")
+            df['news_sentiment'] = 0.0
+            df['news_count_7d'] = 0
+            df['news_sentiment_7d'] = 0.0
+        except Exception as e:
+            logger.warning(f"Ошибка анализа новостей для {ticker}: {e}")
+            df['news_sentiment'] = 0.0
+            df['news_count_7d'] = 0
+            df['news_sentiment_7d'] = 0.0
         
         return df
     
@@ -261,6 +502,7 @@ class FeatureEngine:
         ticker: str,
         price_df: pd.DataFrame,
         macro_df: pd.DataFrame,
+        news_df: pd.DataFrame = None,
         horizon: int = 1
     ) -> pd.DataFrame:
         """Полный пайплайн обработки данных для одного тикера."""
@@ -276,6 +518,14 @@ class FeatureEngine:
         # Добавление макро-факторов
         if macro_df is not None and not macro_df.empty:
             df = self.add_macro_features(df, macro_df)
+        
+        # Добавление новостных признаков
+        if news_df is not None and not news_df.empty:
+            df = self.add_news_features(df, news_df, ticker)
+        else:
+            df['news_sentiment'] = 0.0
+            df['news_count_7d'] = 0
+            df['news_sentiment_7d'] = 0.0
         
         # Создание таргета
         df = self.create_target(df, horizon)
@@ -304,21 +554,24 @@ class FeatureEngine:
         # RSI, MACD, ATR
         feature_cols.extend(['rsi', 'macd', 'macd_signal', 'macd_hist', 'atr'])
         
+        # Bollinger Bands
+        feature_cols.extend(['bb_width', 'bb_position'])
+        
         # Другие технические
         feature_cols.extend([
-            'log_return', 'volume_ratio',
+            'log_return', 'volume_ratio', 'volume_ma_ratio',
             'price_sma20_deviation', 'price_sma50_deviation', 'price_sma200_deviation',
-            'ema_ratio', 'volatility_20d'
+            'ema_ratio', 'volatility_20d', 'volatility_60d',
+            'momentum_10d', 'momentum_20d',
+            'stochastic_k', 'stochastic_d', 'adx', 'gap'
         ])
         
         # Макро
         feature_cols.extend(['key_rate', 'inflation', 'usd_rub', 'brent'])
+        feature_cols.extend(['key_rate_change', 'inflation_change', 'usd_rub_change', 'brent_change'])
         
-        # Prophet forecast features
-        feature_cols.extend([
-            'prophet_trend', 'prophet_yhat', 'prophet_yhat_upper',
-            'prophet_yhat_lower', 'prophet_uncertainty'
-        ])
+        # Новости
+        feature_cols.extend(['news_sentiment', 'news_count_7d', 'news_sentiment_7d'])
         
         return feature_cols
 
@@ -326,6 +579,7 @@ class FeatureEngine:
 def create_panel_data(
     ticker_data_dict: dict,
     macro_df: pd.DataFrame,
+    news_df: pd.DataFrame,
     horizon: int = 1,
     feature_engine: FeatureEngine = None
 ) -> pd.DataFrame:
@@ -343,6 +597,7 @@ def create_panel_data(
                 ticker=ticker,
                 price_df=price_df,
                 macro_df=macro_df,
+                news_df=news_df,
                 horizon=horizon
             )
             if not processed.empty:
@@ -372,21 +627,17 @@ def split_data_time_series(panel_df: pd.DataFrame) -> tuple:
         panel_df['Date'] = pd.to_datetime(panel_df['Date'])
         panel_df.set_index('Date', inplace=True)
     
-    # Разбиение по датам
-    train_df = panel_df[
-        (panel_df.index >= '2019-01-01') & 
-        (panel_df.index <= '2021-12-31')
-    ]
+    # Разбиение по датам - используем все доступные данные
+    min_date = panel_df.index.min()
+    max_date = panel_df.index.max()
     
-    val_df = panel_df[
-        (panel_df.index >= '2022-01-01') & 
-        (panel_df.index <= '2022-12-31')
-    ]
+    # 60% train, 20% val, 20% test
+    train_end = min_date + (max_date - min_date) * 0.6
+    val_end = min_date + (max_date - min_date) * 0.8
     
-    test_df = panel_df[
-        (panel_df.index >= '2023-01-01') & 
-        (panel_df.index <= '2024-12-31')
-    ]
+    train_df = panel_df[panel_df.index <= train_end]
+    val_df = panel_df[(panel_df.index > train_end) & (panel_df.index <= val_end)]
+    test_df = panel_df[panel_df.index > val_end]
     
     logger.info(f"Train: {len(train_df)} записей ({train_df.index.min()} - {train_df.index.max()})")
     logger.info(f"Val: {len(val_df)} записей ({val_df.index.min()} - {val_df.index.max()})")
@@ -420,43 +671,110 @@ def prepare_features_and_target(df: pd.DataFrame, feature_columns: list) -> tupl
     return X, y, available_features
 
 
-def train_model(
+def train_ensemble_model(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_val: pd.DataFrame,
     y_val: pd.Series,
     feature_columns: list
-) -> CatBoostClassifier:
-    """Обучение модели CatBoost с early stopping."""
-    logger.info("=== Этап 4: Обучение модели CatBoost ===")
+) -> tuple:
+    """Обучение ансамбля моделей."""
+    logger.info("=== Этап 4: Обучение ансамбля моделей ===")
     
-    # Параметры модели CatBoost
-    model = CatBoostClassifier(
-        iterations=1000,
-        learning_rate=0.05,
-        depth=6,
-        l2_leaf_reg=3,
-        loss_function='Logloss',
-        eval_metric='AUC',
-        early_stopping_rounds=50,
-        random_seed=42,
-        verbose=100
+    # 1. LightGBM - основная модель (быстрая и эффективная)
+    logger.info("Обучение LightGBM...")
+    lgbm_model = lgb.LGBMClassifier(
+        n_estimators=500,
+        learning_rate=0.03,
+        max_depth=8,
+        num_leaves=31,
+        min_child_samples=20,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=42,
+        verbose=-1
     )
     
-    # Обучение с early stopping
-    model.fit(
+    lgbm_model.fit(
         X_train, y_train,
-        eval_set=(X_val, y_val),
-        use_best_model=True
+        eval_set=[(X_val, y_val)],
+        callbacks=[lgb.early_stopping(stopping_rounds=50)]
+    )
+    logger.info(f"LightGBM: {lgbm_model.best_iteration_} итераций")
+    
+    # 2. Gradient Boosting
+    logger.info("Обучение Gradient Boosting...")
+    gb_model = GradientBoostingClassifier(
+        n_estimators=200,
+        learning_rate=0.05,
+        max_depth=5,
+        min_samples_split=20,
+        min_samples_leaf=10,
+        random_state=42
+    )
+    gb_model.fit(X_train, y_train)
+    
+    # 3. Random Forest
+    logger.info("Обучение Random Forest...")
+    rf_model = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=10,
+        min_samples_split=20,
+        min_samples_leaf=10,
+        random_state=42,
+        n_jobs=-1
+    )
+    rf_model.fit(X_train, y_train)
+    
+    # 4. Логистическая регрессия с калибровкой
+    logger.info("Обучение Logistic Regression...")
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    
+    lr_base = LogisticRegression(
+        C=0.1,
+        max_iter=1000,
+        random_state=42
+    )
+    lr_model = CalibratedClassifierCV(lr_base, cv=3)
+    lr_model.fit(X_train_scaled, y_train)
+    
+    # Создаем голосующий ансамбль
+    logger.info("Создание Voting Ensemble...")
+    ensemble = VotingClassifier(
+        estimators=[
+            ('lightgbm', lgbm_model),
+            ('gradient_boosting', gb_model),
+            ('random_forest', rf_model),
+            ('logistic_regression', lr_model)
+        ],
+        voting='soft',
+        weights=[3, 2, 2, 1]  # LightGBM имеет наибольший вес
     )
     
-    logger.info(f"Обучение завершено. Использовано {model.tree_count_} деревьев")
+    ensemble.fit(X_train, y_train)
     
-    return model
+    # Оценка на валидации
+    val_pred = ensemble.predict(X_val)
+    val_proba = ensemble.predict_proba(X_val)[:, 1]
+    val_auc = roc_auc_score(y_val, val_proba)
+    
+    logger.info(f"Ансамбль: AUC на валидации = {val_auc:.4f}")
+    
+    return ensemble, {
+        'lightgbm': lgbm_model,
+        'gradient_boosting': gb_model,
+        'random_forest': rf_model,
+        'logistic_regression': lr_model,
+        'scaler': scaler
+    }
 
 
 def evaluate_model(
-    model: CatBoostClassifier,
+    model,
     X_test: pd.DataFrame,
     y_test: pd.Series,
     feature_columns: list
@@ -474,6 +792,7 @@ def evaluate_model(
         'precision': precision_score(y_test, y_pred, zero_division=0),
         'recall': recall_score(y_test, y_pred, zero_division=0),
         'f1': f1_score(y_test, y_pred, zero_division=0),
+        'roc_auc': roc_auc_score(y_test, y_prob)
     }
     
     logger.info("\n" + "="*50)
@@ -486,8 +805,9 @@ def evaluate_model(
     logger.info("\nClassification Report:")
     logger.info(classification_report(y_test, y_pred, target_names=['DOWN', 'UP']))
     
-    # Feature importance
-    feature_importance = dict(zip(feature_columns, model.feature_importances_.tolist()))
+    # Feature importance (берем из LightGBM)
+    lgbm_model = model.named_estimators_['lightgbm']
+    feature_importance = dict(zip(feature_columns, lgbm_model.feature_importances_.tolist()))
     sorted_importance = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
     
     logger.info("\nТоп-10 важных признаков:")
@@ -498,7 +818,8 @@ def evaluate_model(
 
 
 def save_model(
-    model: CatBoostClassifier,
+    model,
+    sub_models: dict,
     feature_columns: list,
     feature_importance: dict,
     metrics: dict,
@@ -511,11 +832,16 @@ def save_model(
     model_dir = Path(__file__).parent.parent / "backend" / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
     
-    model_path = model_dir / "catboost_portfolio.cbm"
+    # Сохраняем основной ансамбль
+    model_path = model_dir / "ensemble_portfolio.joblib"
+    joblib.dump(model, model_path)
+    logger.info(f"Ансамбль сохранен в {model_path}")
     
-    # Сохраняем модель в нативном формате CatBoost
-    model.save_model(str(model_path))
-    logger.info(f"Модель сохранена в {model_path}")
+    # Сохраняем подмодели отдельно
+    for name, mdl in sub_models.items():
+        sub_path = model_dir / f"{name}.joblib"
+        joblib.dump(mdl, sub_path)
+        logger.info(f"Модель {name} сохранена в {sub_path}")
     
     # Сохраняем метаданные отдельно
     metadata = {
@@ -525,8 +851,9 @@ def save_model(
         'metrics': metrics,
         'config': {
             'tickers': tickers,
-            'train_period': '2019-01-01 - 2021-12-31',
-            'prediction_horizon': 1
+            'train_period': 'auto',
+            'prediction_horizon': 1,
+            'models': list(sub_models.keys())
         }
     }
     
@@ -598,11 +925,11 @@ def main():
     
     try:
         # Этап 1: Загрузка данных
-        price_data, macro_df = load_and_prepare_data(tickers, "2018-01-01", args.end_date)
+        price_data, macro_df, news_df = load_and_prepare_data(tickers, "2018-01-01", args.end_date)
         
         # Этап 2: Создание признаков
         feature_engine = FeatureEngine()
-        panel_df = create_panel_data(price_data, macro_df, horizon=1, feature_engine=feature_engine)
+        panel_df = create_panel_data(price_data, macro_df, news_df, horizon=1, feature_engine=feature_engine)
         
         if panel_df.empty:
             raise ValueError("Панельный DataFrame пуст после обработки")
@@ -623,14 +950,14 @@ def main():
         
         logger.info(f"Признаков используется: {len(used_features)}")
         
-        # Этап 4: Обучение модели
-        model = train_model(X_train, y_train, X_val, y_val, used_features)
+        # Этап 4: Обучение ансамбля моделей
+        model, sub_models = train_ensemble_model(X_train, y_train, X_val, y_val, used_features)
         
         # Этап 5: Оценка модели
         metrics, feature_importance = evaluate_model(model, X_test, y_test, used_features)
         
         # Этап 6: Сохранение
-        save_model(model, used_features, feature_importance, metrics, tickers)
+        save_model(model, sub_models, used_features, feature_importance, metrics, tickers)
         
         logger.info("="*60)
         logger.info("ОБУЧЕНИЕ ЗАВЕРШЕНО УСПЕШНО!")

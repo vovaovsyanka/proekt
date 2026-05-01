@@ -1,12 +1,14 @@
 """
 API Routes: endpoints для работы с рекомендациями.
+Включает генерацию персонализированных рекомендаций с NLP-объяснениями.
 """
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from typing import List
+from typing import List, Dict, Any
 import logging
 from datetime import datetime
 import concurrent.futures
 from functools import partial
+import json
 
 from backend.app.models.schemas import (
     PortfolioRequest,
@@ -26,6 +28,135 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["recommendations"])
 
 
+def generate_text_explanation(
+    ticker: str,
+    action: str,
+    confidence: float,
+    expected_return: float,
+    top_features: List[Dict[str, Any]],
+    sentiment_score: float,
+    current_price: float,
+    macro_context: Dict[str, float] = None
+) -> str:
+    """
+    Генерация текстового объяснения рекомендации с использованием шаблонов и данных.
+    
+    Args:
+        ticker: Тикер акции
+        action: Рекомендация (BUY/SELL/HOLD)
+        confidence: Уверенность модели
+        expected_return: Ожидаемая доходность
+        top_features: Топ важных признаков
+        sentiment_score: Сентимент новостей (-1 до +1)
+        current_price: Текущая цена
+        macro_context: Макроэкономический контекст
+        
+    Returns:
+        Текстовое объяснение рекомендации
+    """
+    # Определяем действие
+    if action == "BUY":
+        action_text = "покупать"
+        action_reason = "модель прогнозирует рост стоимости"
+    elif action == "SELL":
+        action_text = "продавать"
+        action_reason = "модель прогнозирует снижение стоимости"
+    else:
+        action_text = "держать"
+        action_reason = "недостаточно сигналов для активных действий"
+    
+    # Формируем базовое объяснение
+    explanation_parts = []
+    
+    # 1. Основная рекомендация
+    explanation_parts.append(
+        f"По акции {ticker} рекомендуется {action_text}. "
+        f"{action_reason.capitalize()} в ближайшие дни."
+    )
+    
+    # 2. Уровень уверенности
+    if confidence >= 0.75:
+        confidence_desc = "высокая"
+    elif confidence >= 0.6:
+        confidence_desc = "средняя"
+    else:
+        confidence_desc = "низкая"
+    
+    explanation_parts.append(
+        f"Уверенность модели: {confidence_desc} ({confidence:.1%})."
+    )
+    
+    # 3. Ожидаемая доходность
+    if abs(expected_return) > 0:
+        if expected_return > 0:
+            explanation_parts.append(
+                f"Ожидаемая потенциальная доходность: +{expected_return:.2f}%."
+            )
+        else:
+            explanation_parts.append(
+                f"Ожидаемое изменение: {expected_return:.2f}%."
+            )
+    
+    # 4. Ключевые факторы (топ признаки)
+    if top_features:
+        factors_text = "Ключевые факторы решения:"
+        for i, feat in enumerate(top_features[:3], 1):
+            feat_name = feat.get('feature', 'Unknown')
+            feat_value = feat.get('value', 0)
+            feat_impact = feat.get('impact', 'neutral')
+            
+            # Переводим названия признаков на русский
+            feature_translations = {
+                'key_rate': 'ключевая ставка ЦБ',
+                'rsi': 'индекс RSI',
+                'macd': 'индикатор MACD',
+                'volatility_20d': '20-дневная волатильность',
+                'price_sma20_deviation': 'отклонение от SMA20',
+                'momentum_20d': '20-дневный моментум',
+                'news_sentiment': 'сентимент новостей',
+                'brent': 'цена нефти Brent',
+                'usd_rub': 'курс USD/RUB'
+            }
+            
+            feat_name_ru = feature_translations.get(feat_name, feat_name)
+            factors_text += f"\n  {i}. {feat_name_ru}: {feat_value:.2f}"
+        
+        explanation_parts.append(factors_text)
+    
+    # 5. Влияние новостей
+    if abs(sentiment_score) > 0.1:
+        if sentiment_score > 0:
+            news_sentiment = "позитивный"
+        else:
+            news_sentiment = "негативный"
+        explanation_parts.append(
+            f"Сентимент финансовых новостей: {news_sentiment} ({sentiment_score:+.2f})."
+        )
+    
+    # 6. Макроэкономический контекст
+    if macro_context:
+        macro_text = "Макроэкономическая ситуация:"
+        if 'key_rate' in macro_context:
+            macro_text += f"\n  - Ключевая ставка: {macro_context['key_rate']:.2f}%"
+        if 'brent' in macro_context:
+            macro_text += f"\n  - Нефть Brent: ${macro_context['brent']:.1f}"
+        if 'usd_rub' in macro_context:
+            macro_text += f"\n  - USD/RUB: {macro_context['usd_rub']:.2f}"
+        explanation_parts.append(macro_text)
+    
+    # 7. Предупреждение о рисках
+    if confidence < 0.6:
+        explanation_parts.append(
+            "\n⚠️ Внимание: низкая уверенность модели. Рекомендуется дополнительный анализ."
+        )
+    elif abs(expected_return) < 1:
+        explanation_parts.append(
+            "\nℹ️ Примечание: ожидаемая доходность невысока. Рассмотрите другие варианты."
+        )
+    
+    return "\n\n".join(explanation_parts)
+
+
 def process_ticker_prediction(
     ticker: str,
     data_loader: DataLoader,
@@ -36,17 +167,6 @@ def process_ticker_prediction(
 ) -> Recommendation:
     """
     Обработка предсказания для одного тикера (синхронная функция для ThreadPool).
-    
-    Args:
-        ticker: Тикер акции
-        data_loader: Загрузчик данных
-        feature_engine: Движок признаков
-        sentiment_analyzer: Анализатор сентимента
-        predictor: Предиктор модели
-        lookback_days: Количество дней данных для анализа
-        
-    Returns:
-        Recommendation с предсказанием
     """
     logger.info(f"Обработка тикера {ticker}")
     
@@ -134,12 +254,27 @@ def process_ticker_prediction(
             sentiment_result = get_cached_sentiment(sentiment_analyzer, news_list)
             sentiment_score = sentiment_result['avg_compound']
             
-            # Генерируем обоснование
-            reasoning = predictor.generate_reasoning(
-                prediction=prediction,
+            # Получаем макро контекст
+            macro_context = {}
+            if not macro_df.empty:
+                last_macro = macro_df.iloc[-1]
+                if 'key_rate' in last_macro:
+                    macro_context['key_rate'] = float(last_macro['key_rate'])
+                if 'brent' in last_macro:
+                    macro_context['brent'] = float(last_macro['brent'])
+                if 'usd_rub' in last_macro:
+                    macro_context['usd_rub'] = float(last_macro['usd_rub'])
+            
+            # Генерируем текстовое объяснение
+            reasoning = generate_text_explanation(
+                ticker=ticker,
+                action=action,
                 confidence=confidence,
+                expected_return=expected_return,
                 top_features=top_features,
-                sentiment_score=sentiment_score
+                sentiment_score=sentiment_score,
+                current_price=current_price,
+                macro_context=macro_context
             )
             
             return Recommendation(

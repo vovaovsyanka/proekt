@@ -32,7 +32,6 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.preprocessing import StandardScaler
 import joblib
 import lightgbm as lgb
@@ -552,7 +551,7 @@ def train_model(
     """Обучение ансамбля моделей: LightGBM + GradientBoosting + RandomForest + LogisticRegression."""
     logger.info("=== Этап 4: Обучение ансамбля моделей ===")
     
-    # Модель 1: LightGBM (основная)
+    # Модель 1: LightGBM (основная) - отключаем многопоточность для Windows
     logger.info("Обучение LightGBM...")
     lgb_model = lgb.LGBMClassifier(
         n_estimators=500,
@@ -563,7 +562,8 @@ def train_model(
         subsample=0.8,
         colsample_bytree=0.8,
         random_state=42,
-        verbose=-1
+        verbose=-1,
+        n_jobs=1  # Отключаем многопоточность для избежания проблем на Windows
     )
     lgb_model.fit(X_train, y_train)
     
@@ -589,18 +589,18 @@ def train_model(
         min_samples_leaf=10,
         max_features='sqrt',
         random_state=42,
-        n_jobs=-1
+        n_jobs=1  # Отключаем многопоточность для стабильности
     )
     rf_model.fit(X_train, y_train)
     
-    # Модель 4: Logistic Regression с калибровкой
+    # Модель 4: Logistic Regression (без калибровки для простоты)
     logger.info("Обучение LogisticRegression...")
-    lr_base = LogisticRegression(
+    lr_model = LogisticRegression(
         max_iter=1000,
         random_state=42,
-        C=0.1
+        C=0.1,
+        n_jobs=1
     )
-    lr_model = CalibratedClassifierCV(lr_base, method='sigmoid', cv=3)
     lr_model.fit(X_train, y_train)
     
     # Создаем ансамбль с весами
@@ -662,16 +662,9 @@ def evaluate_model(
         for name, est in model.named_estimators_.items():
             if hasattr(est, 'feature_importances_'):
                 importances.append(est.feature_importances_)
-            elif hasattr(est, 'calibrated_classifiers_'):
-                # Для CalibratedClassifierCV берем важность базовой модели
-                for cal_clf in est.calibrated_classifiers_:
-                    # Проверяем наличие estimator_ или base_estimator
-                    base_est = getattr(cal_clf, 'estimator_', None) or getattr(cal_clf, 'base_estimator_', None)
-                    if base_est is not None:
-                        if hasattr(base_est, 'coef_'):
-                            importances.append(np.abs(base_est.coef_[0]))
-                        elif hasattr(base_est, 'feature_importances_'):
-                            importances.append(base_est.feature_importances_)
+            elif hasattr(est, 'coef_'):
+                # Для LogisticRegression используем абсолютные значения коэффициентов
+                importances.append(np.abs(est.coef_[0]))
         
         if importances:
             # Усредняем важность признаков

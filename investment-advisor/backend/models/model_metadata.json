@@ -1,0 +1,67 @@
+{
+  "feature_columns": [
+    "sma_20",
+    "sma_50",
+    "sma_200",
+    "ema_12",
+    "ema_26",
+    "rsi",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "atr",
+    "log_return",
+    "volume_ratio",
+    "price_sma20_deviation",
+    "price_sma50_deviation",
+    "price_sma200_deviation",
+    "ema_ratio",
+    "volatility_20d",
+    "key_rate",
+    "inflation",
+    "usd_rub",
+    "brent"
+  ],
+  "feature_importance": {
+    "sma_20": 52.266879370825,
+    "sma_50": 59.76728449978607,
+    "sma_200": 60.27226319121388,
+    "ema_12": 37.76632492882142,
+    "ema_26": 32.2637982726464,
+    "rsi": 175.0369101281165,
+    "macd": 80.5220634038726,
+    "macd_signal": 94.52506030155799,
+    "macd_hist": 150.2833807854282,
+    "atr": 115.27876484436304,
+    "log_return": 238.55014869397297,
+    "volume_ratio": 206.80331628639195,
+    "price_sma20_deviation": 138.531985406736,
+    "price_sma50_deviation": 133.77839849662303,
+    "price_sma200_deviation": 140.53491011927815,
+    "ema_ratio": 122.02857838094432,
+    "volatility_20d": 156.78619266699852,
+    "key_rate": 32.27883355360372,
+    "inflation": 11.757169557899788,
+    "usd_rub": 5.25309741110299,
+    "brent": 3.001999237252092
+  },
+  "trained_date": "2026-05-01T11:47:03.826323",
+  "metrics": {
+    "accuracy": 0.4993757802746567,
+    "precision": 0.49482596425211667,
+    "recall": 0.4412751677852349,
+    "f1": 0.46651884700665186
+  },
+  "config": {
+    "tickers": [
+      "SBER",
+      "GAZP",
+      "LKOH",
+      "NVTK",
+      "YNDX"
+    ],
+    "train_period": "2019-01-01 - 2021-12-31",
+    "prediction_horizon": 1,
+    "model_type": "VotingClassifier (LightGBM + GradientBoosting + RandomForest + LogisticRegression)"
+  }
+}

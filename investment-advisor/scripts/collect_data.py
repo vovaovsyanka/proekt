@@ -252,6 +252,33 @@ class MOEXDataCollector:
             logger.warning(f"Не найдены нужные колонки в данных для {ticker}")
             return pd.DataFrame()
     
+    def download_ticker_data(
+        self,
+        ticker: str,
+        start_date: str,
+        end_date: str,
+        use_cache: bool = True
+    ) -> pd.DataFrame:
+        """
+        Обёртка над get_moex_candles для совместимости с data_loader.
+        
+        Args:
+            ticker: Тикер акции (например, 'SBER')
+            start_date: Дата начала в формате YYYY-MM-DD
+            end_date: Дата окончания в формате YYYY-MM-DD
+            use_cache: Использовать ли кэш
+            
+        Returns:
+            DataFrame с колонками: open, high, low, close, volume
+        """
+        return self.get_moex_candles(
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            interval=24,  # дневные свечи
+            use_cache=use_cache
+        )
+    
     def download_multiple_tickers(
         self,
         tickers: List[str],

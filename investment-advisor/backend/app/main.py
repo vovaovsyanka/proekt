@@ -63,9 +63,9 @@ app = FastAPI(
 ## Система инвестиционных рекомендаций на основе ML
 
 Этот API предоставляет рекомендации по российским акциям используя:
-- **Технический анализ**: RSI, MACD, SMA, EMA, ATR
-- **ML модель**: CatBoost classifier обученный на исторических данных MOEX
-- **Прогнозирование временных рядов**: Prophet для forecast фичей
+- **Технический анализ**: RSI, MACD, SMA, EMA, ATR, Stochastic, ADX, Bollinger Bands
+- **Ансамбль ML моделей**: LightGBM + GradientBoosting + RandomForest + LogisticRegression (VotingClassifier)
+- **NLP анализ новостей**: FinBERT для сентимент-анализа финансовых новостей
 - **Макроэкономические факторы**: ключевая ставка ЦБ, инфляция, курс USD/RUB, Brent
 
 ### Основные endpoints:

@@ -1,6 +1,6 @@
 """
 Сервис ML-инференса: загрузка модели и генерация предсказаний.
-Использует CatBoost модель для классификации направления движения цены.
+Использует ансамбль моделей (VotingClassifier) для классификации направления движения цены.
 """
 import json
 import joblib
@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import logging
 from datetime import datetime
-from catboost import CatBoostClassifier
 
 from backend.config import settings
 
@@ -22,7 +21,7 @@ class ModelPredictor:
     Сервис для загрузки модели и генерации предсказаний.
     
     Отвечает за:
-    - Загрузку обученной CatBoost модели из файла
+    - Загрузку обученной ансамбль-модели из файла
     - Предобработку признаков (нормализация, порядок колонок)
     - Генерацию предсказаний и вероятностей
     - Расчет confidence score на основе вероятности и согласованности признаков
@@ -34,9 +33,9 @@ class ModelPredictor:
         Инициализация предиктора.
         
         Args:
-            model_path: Путь к файлу модели .cbm
+            model_path: Путь к файлу модели .pkl
         """
-        self.model_path = model_path or settings.model_file_path
+        self.model_path = model_path or (settings.model_file_path.parent / "ensemble_portfolio.pkl")
         self.metadata_path = settings.model_metadata_path
         self.model = None
         self.feature_columns = None
@@ -58,11 +57,10 @@ class ModelPredictor:
                 logger.warning(f"Файл модели не найден: {self.model_path}")
                 return False
             
-            logger.info(f"Загрузка CatBoost модели из {self.model_path}")
+            logger.info(f"Загрузка ансамбль-модели из {self.model_path}")
             
-            # Загружаем CatBoost модель
-            self.model = CatBoostClassifier()
-            self.model.load_model(str(self.model_path))
+            # Загружаем модель через joblib
+            self.model = joblib.load(str(self.model_path))
             
             # Загружаем метаданные
             if self.metadata_path.exists():

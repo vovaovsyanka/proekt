@@ -171,6 +171,66 @@ class FeatureEngine:
         logger.debug("Добавлены макро-признаки")
         return df
     
+    def add_news_sentiment_features(
+        self, 
+        df: pd.DataFrame, 
+        news_df: pd.DataFrame,
+        ticker: str = None
+    ) -> pd.DataFrame:
+        """
+        Добавление признаков сентимента из новостей.
+        
+        Args:
+            df: DataFrame с данными по акции
+            news_df: DataFrame с новостями и сентиментом
+            ticker: Тикер для фильтрации релевантных новостей
+            
+        Returns:
+            DataFrame с добавленными признаками сентимента
+        """
+        if df.empty or news_df.empty:
+            return df
+        
+        df = df.copy()
+        
+        # Убеждаемся что индексы datetime
+        if hasattr(df.index, 'tz') and df.index.tz is not None:
+            df.index = df.index.tz_convert('UTC').tz_localize(None)
+        else:
+            df.index = pd.to_datetime(df.index)
+        
+        news_copy = news_df.copy()
+        if 'date' in news_copy.columns:
+            news_copy['date'] = pd.to_datetime(news_copy['date'])
+            news_copy.set_index('date', inplace=True)
+        
+        if hasattr(news_copy.index, 'tz') and news_copy.index.tz is not None:
+            news_copy.index = news_copy.index.tz_convert('UTC').tz_localize(None)
+        
+        # Агрегируем сентимент по дням (средний сентимент за день)
+        if 'sentiment_score' in news_copy.columns:
+            daily_sentiment = news_copy.groupby(news_copy.index.date)['sentiment_score'].agg([
+                ('news_sentiment', 'mean'),
+                ('news_count', 'count'),
+                ('news_sentiment_std', 'std')
+            ]).fillna(0)
+            
+            # Мердж с основными данными
+            df = df.join(daily_sentiment, how='left')
+            
+            # Скользящее среднее сентимента за 7 дней
+            if 'news_sentiment' in df.columns:
+                df['news_sentiment_7d'] = df['news_sentiment'].rolling(window=7, min_periods=1).mean()
+                df['news_count_7d'] = df['news_count'].rolling(window=7, min_periods=1).sum()
+            
+            # Заполняем пропуски нулями (нет новостей = нейтральный фон)
+            sentiment_cols = [col for col in df.columns if 'news' in col.lower()]
+            for col in sentiment_cols:
+                df[col] = df[col].fillna(0)
+        
+        logger.debug(f"Добавлены признаки сентимента новостей")
+        return df
+    
     def create_target(self, df: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
         """
         Создание целевой переменной для классификации.
@@ -208,7 +268,8 @@ class FeatureEngine:
         ticker: str,
         price_df: pd.DataFrame,
         macro_df: Optional[pd.DataFrame] = None,
-        horizon: int = 1
+        horizon: int = 1,
+        news_df: Optional[pd.DataFrame] = None
     ) -> pd.DataFrame:
         """
         Полный пайплайн обработки данных для одного тикера.
@@ -218,6 +279,7 @@ class FeatureEngine:
             price_df: DataFrame с ценами
             macro_df: DataFrame с макро-данными (опционально)
             horizon: Горизонт прогноза
+            news_df: DataFrame с новостями и сентиментом (опционально)
             
         Returns:
             DataFrame со всеми признаками и таргетом
@@ -230,6 +292,10 @@ class FeatureEngine:
         # Добавление макро-факторов
         if macro_df is not None and not macro_df.empty:
             df = self.add_macro_features(df, macro_df)
+        
+        # Добавление сентимента из новостей
+        if news_df is not None and not news_df.empty:
+            df = self.add_news_sentiment_features(df, news_df, ticker)
         
         # Создание таргета
         df = self.create_target(df, horizon)

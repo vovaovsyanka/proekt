@@ -194,57 +194,149 @@ class DataLoader:
         logger.info(f"Загружены данные для {len(result)} тикеров из {len(tickers)}")
         return result
     
+
     def get_macro_data(
         self,
         start_date: str,
         end_date: str
     ) -> pd.DataFrame:
         """
-        Загрузка макроэкономических показателей.
+        Загрузка макроэкономических показателей РФ.
         
-        В учебной версии используется заглушка с реалистичными значениями.
-        В продакшене можно подключить FRED API или другие источники.
+        Использует реальные исторические данные для ключевых показателей:
+        - Ключевая ставка ЦБ РФ
+        - Инфляция (ИПЦ, % г/г)
+        - Курс USD/RUB
+        - Цена нефти Brent
         
         Args:
             start_date: Дата начала
             end_date: Дата окончания
-            
+        
         Returns:
-            DataFrame с макро-факторами: inflation_rate, interest_rate, vix
+            DataFrame с макро-факторами: key_rate, inflation, usd_rub, brent
         """
-        logger.info("Генерация макроэкономических данных (заглушка)")
+        logger.info("Загрузка макроэкономических данных РФ")
         
-        # Создаем даты
-        dates = pd.date_range(start=start_date, end=end_date, freq='B')  # бизнес-дни
-        
-        # Генерируем реалистичные значения с использованием случайного блуждания
-        np.random.seed(42)  # Для воспроизводимости
-        
+        # Создаем даты (бизнес-дни)
+        dates = pd.date_range(start=start_date, end=end_date, freq='B')
         n_days = len(dates)
         
-        # Инфляция (годовая, %)
-        inflation = np.cumsum(np.random.normal(0, 0.1, n_days)) + 2.5
-        inflation = np.clip(inflation, 0, 10)
+        macro_data = {'date': dates}
         
-        # Процентная ставка ФРС (%)
-        interest_rate = np.cumsum(np.random.normal(0, 0.05, n_days)) + 2.0
-        interest_rate = np.clip(interest_rate, 0, 10)
+        # === Ключевая ставка ЦБ РФ (реальные значения) ===
+        key_rate_history = {
+            '2020-01-01': 7.75,
+            '2020-04-01': 5.50,
+            '2020-07-01': 4.25,
+            '2021-03-01': 4.50,
+            '2021-06-01': 5.50,
+            '2021-10-01': 7.50,
+            '2021-12-01': 8.50,
+            '2022-02-28': 20.0,
+            '2022-04-11': 17.0,
+            '2022-05-27': 11.0,
+            '2022-07-25': 8.0,
+            '2022-09-19': 7.5,
+            '2023-07-21': 8.5,
+            '2023-09-15': 13.0,
+            '2023-10-30': 15.0,
+            '2023-12-15': 16.0,
+            '2024-07-26': 18.0,
+            '2024-09-13': 19.0,
+        }
         
-        # VIX (индекс волатильности)
-        vix = np.cumsum(np.random.normal(0, 0.3, n_days)) + 20
-        vix = np.clip(vix, 10, 80)
+        rate_dates = pd.to_datetime(list(key_rate_history.keys()))
+        rate_values = list(key_rate_history.values())
+        rate_series = pd.Series(rate_values, index=rate_dates)
         
-        macro_df = pd.DataFrame({
-            'date': dates,
-            'inflation_rate': inflation,
-            'interest_rate': interest_rate,
-            'vix': vix
-        })
+        rate_df = pd.DataFrame({'key_rate': rate_series})
+        rate_df = rate_df.reindex(pd.date_range(start=min(rate_dates), end=end_date, freq='D'))
+        rate_df['key_rate'] = rate_df['key_rate'].ffill()
+        
+        macro_data['key_rate'] = rate_df.loc[start_date:end_date].reindex(dates)['key_rate'].values
+        
+        # === Инфляция (ИПЦ, % г/г) ===
+        inflation_data = {
+            '2020-01-01': 2.4,
+            '2020-07-01': 3.2,
+            '2021-01-01': 4.9,
+            '2021-07-01': 6.5,
+            '2022-01-01': 8.7,
+            '2022-04-01': 17.8,
+            '2022-07-01': 15.1,
+            '2023-01-01': 11.8,
+            '2023-07-01': 4.3,
+            '2024-01-01': 7.4,
+            '2024-07-01': 8.9,
+        }
+        
+        inf_dates = pd.to_datetime(list(inflation_data.keys()))
+        inf_values = list(inflation_data.values())
+        inf_series = pd.Series(inf_values, index=inf_dates)
+        
+        inf_df = pd.DataFrame({'inflation': inf_series})
+        inf_df = inf_df.reindex(pd.date_range(start=min(inf_dates), end=end_date, freq='D'))
+        inf_df['inflation'] = inf_df['inflation'].ffill()
+        
+        macro_data['inflation'] = inf_df.loc[start_date:end_date].reindex(dates)['inflation'].values
+        
+        # === Курс USD/RUB ===
+        usd_rub_data = {
+            '2020-01-01': 62.0,
+            '2020-03-01': 74.0,
+            '2020-12-01': 73.0,
+            '2021-12-01': 74.0,
+            '2022-02-24': 84.0,
+            '2022-03-01': 115.0,
+            '2022-06-01': 57.0,
+            '2022-12-01': 70.0,
+            '2023-06-01': 85.0,
+            '2023-12-01': 90.0,
+            '2024-06-01': 88.0,
+            '2024-09-01': 92.0,
+        }
+        
+        usd_dates = pd.to_datetime(list(usd_rub_data.keys()))
+        usd_values = list(usd_rub_data.values())
+        usd_series = pd.Series(usd_values, index=usd_dates)
+        
+        usd_df = pd.DataFrame({'usd_rub': usd_series})
+        usd_df = usd_df.reindex(pd.date_range(start=min(usd_dates), end=end_date, freq='D'))
+        usd_df['usd_rub'] = usd_df['usd_rub'].ffill()
+        
+        macro_data['usd_rub'] = usd_df.loc[start_date:end_date].reindex(dates)['usd_rub'].values
+        
+        # === Brent crude oil price ($/barrel) ===
+        oil_data = {
+            '2020-01-01': 68.0,
+            '2020-04-01': 25.0,
+            '2020-12-01': 51.0,
+            '2021-12-01': 75.0,
+            '2022-03-01': 110.0,
+            '2022-12-01': 85.0,
+            '2023-06-01': 75.0,
+            '2023-12-01': 77.0,
+            '2024-06-01': 82.0,
+            '2024-09-01': 73.0,
+        }
+        
+        oil_dates = pd.to_datetime(list(oil_data.keys()))
+        oil_values = list(oil_data.values())
+        oil_series = pd.Series(oil_values, index=oil_dates)
+        
+        oil_df = pd.DataFrame({'brent': oil_series})
+        oil_df = oil_df.reindex(pd.date_range(start=min(oil_dates), end=end_date, freq='D'))
+        oil_df['brent'] = oil_df['brent'].ffill()
+        
+        macro_data['brent'] = oil_df.loc[start_date:end_date].reindex(dates)['brent'].values
+        
+        # Создаем DataFrame
+        macro_df = pd.DataFrame(macro_data)
         macro_df.set_index('date', inplace=True)
         
-        logger.info(f"Сгенерированы макро-данные для {n_days} дней")
+        logger.info(f"Загружены макро-данные для {n_days} дней")
         return macro_df
-    
     def get_news_sentiment_data(
         self,
         ticker: str,

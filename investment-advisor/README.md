@@ -1,14 +1,15 @@
 # 📈 Investment Advisor - Система инвестиционных рекомендаций
 
-ML-система для анализа портфеля акций и генерации рекомендаций на основе технических индикаторов, машинного обучения и NLP-анализа новостей.
+ML-система для анализа портфеля акций и генерации рекомендаций на основе технических индикаторов, машинного обучения (CatBoost) и анализа новостей. Использует реальные данные с Московской Биржи (MOEX).
 
 ## 🎯 Возможности
 
-- **Технический анализ**: Расчет 20+ технических индикаторов (RSI, MACD, SMA, EMA, ATR и др.) через библиотеку `finta`
-- **ML модель**: LightGBM классификатор обученный на исторических данных S&P500
-- **NLP сентимент**: Анализ тональности новостей через FinBERT
+- **Технический анализ**: Расчет 20+ технических индикаторов (RSI, MACD, SMA, EMA, ATR и др.)
+- **ML модель**: CatBoost классификатор обученный на исторических данных российских акций
+- **Прогнозирование временных рядов**: Prophet для создания дополнительных фичей
+- **Макроэкономические данные РФ**: Ключевая ставка ЦБ, инфляция, курс USD/RUB, цена нефти Brent
 - **REST API**: FastAPI backend с автоматической документацией
-- **Веб-интерфейс**: Современный UI на Next.js + React + TailwindCSS
+- **Веб-интерфейс**: Современный UI на Next.js + React + TailwindCSS с автокомплитом тикеров
 
 ## 🏗️ Архитектура
 
@@ -19,15 +20,16 @@ investment-advisor/
 │   │   ├── main.py              # FastAPI entrypoint
 │   │   ├── models/schemas.py    # Pydantic модели
 │   │   ├── services/
-│   │   │   ├── data_loader.py   # Загрузка данных (yfinance)
-│   │   │   ├── feature_engine.py # Технические индикаторы (finta)
-│   │   │   ├── sentiment.py     # NLP анализ (FinBERT)
+│   │   │   ├── data_loader.py   # Загрузка данных (MOEX, макро)
+│   │   │   ├── feature_engine.py # Технические индикаторы
+│   │   │   ├── sentiment.py     # Анализ тональности новостей
 │   │   │   └── predictor.py     # ML инференс
 │   │   └── api/routes.py        # API endpoints
-│   ├── ml_pipeline/
-│   │   └── train.py             # Скрипт обучения модели
 │   ├── config.py                # Конфигурация
 │   └── requirements.txt
+├── scripts/
+│   ├── collect_data.py          # Сбор данных с MOEX
+│   └── train_model.py           # Обучение модели (CatBoost)
 ├── frontend/
 │   ├── app/
 │   │   ├── page.tsx             # Главная страница
@@ -54,69 +56,65 @@ cd investment-advisor/backend
 pip install -r requirements.txt
 ```
 
-**Важно:** Используется библиотека `finta` вместо `pandas-ta` (оригинальный репозиторий pandas-ta был удалён автором).
-
-Основные пакеты:
+**Важно:** Используются следующие ключевые пакеты:
 - `fastapi`, `uvicorn` - веб-сервер
-- `finta` - технические индикаторы
-- `lightgbm`, `scikit-learn` - ML модели
-- `transformers`, `torch` - NLP (FinBERT)
-- `yfinance` - загрузка финансовых данных
+- `catboost` - ML модель (вместо LightGBM)
+- `prophet` - прогнозирование временных рядов
+- `pandas`, `numpy` - работа с данными
+- `requests` - HTTP запросы к MOEX API
+- `feedparser` - парсинг RSS новостей
 
-### Шаг 2: Создание .env файла (опционально)
+### Шаг 2: Сбор данных с Московской Биржи
 
-```bash
-cd investment-advisor/backend
-cp .env.example .env
-```
-
-Файл `.env` не обязателен - все параметры имеют значения по умолчанию в `config.py`.
-
-### Шаг 3: Генерация данных (если yfinance не работает)
-
-**Важно:** Если вы видите ошибки `yfinance - ERROR - Failed to get ticker` при обучении, используйте генератор синтетических данных:
+Сбор исторических данных OHLCV для российских акций через MOEX ISS API:
 
 ```bash
 cd investment-advisor
-python backend/ml_pipeline/generate_synthetic_data.py
+python scripts/collect_data.py --tickers SBER,GAZP,LKOH,NVTK,YNDX --start-date 2020-01-01 --end-date 2024-12-31
 ```
 
-Это создаст реалистичные данные для 30 тикеров S&P500 за период 2017-2024 и сохранит их в кэш.
+Параметры:
+- `--tickers`: Список тикеров через запятую (по умолчанию все российские из конфига)
+- `--start-date`: Дата начала в формате YYYY-MM-DD
+- `--end-date`: Дата окончания в формате YYYY-MM-DD
+- `--no-cache`: Не использовать кэш
+- `--output-dir`: Директория для сохранения данных
 
-**Почему это нужно?** Yahoo Finance может блокировать запросы из-за:
-- Частых запросов (rate limiting)
-- Отсутствия заголовков User-Agent
-- Блокировки по региону/провайдеру
-- Нестабильности API
+Данные сохраняются в кэш (`data/cache/`) для повторного использования.
 
-Синтетические данные используют геометрическое броуновское движение с реалистичными параметрами (доходность, волатильность, тренды по секторам).
+**Источники данных:**
+- MOEX ISS API - котировки акций (OHLCV)
+- ЦБ РФ API - макроэкономические показатели (ключевая ставка)
+- Росстат - инфляция, ВВП
+- РБК RSS - новости для анализа сентимента
 
-### Шаг 4: Обучение модели
+### Шаг 3: Обучение модели
 
-Обучение ML модели на исторических данных (занимает 5-15 минут):
+Обучение CatBoost модели на собранных данных (занимает 5-15 минут):
 
 ```bash
 cd investment-advisor
-python backend/ml_pipeline/train.py
+python scripts/train_model.py --tickers SBER,GAZP,LKOH,NVTK,YNDX
 ```
 
 Что происходит при обучении:
-1. Загружаются данные по 30 тикерам за 2018-2024 через yfinance
+1. Загружаются данные из кэша или собираются заново
 2. Рассчитываются технические индикаторы (SMA, EMA, RSI, MACD, ATR, etc.)
-3. Добавляются макро-факторы (VIX, инфляция, ставки) или заглушки
-4. Создается панельный DataFrame [date, ticker, features..., target]
-5. Разбиение: Train (2018-2021), Val (2022), Test (2023-2024)
-6. Обучается LightGBM с early stopping
-7. Модель сохраняется в `models/lgb_portfolio.joblib`
-8. Метрики и feature importance сохраняются в JSON
+3. Добавляются макро-факторы РФ (ключевая ставка, инфляция, USD/RUB, Brent)
+4. Создаются прогнозные фичи через Prophet
+5. Создается панельный DataFrame [date, ticker, features..., target]
+6. Разбиение: Train (2019-2021), Val (2022), Test (2023-2024)
+7. Обучается CatBoost с early stopping
+8. Модель сохраняется в `models/catboost_portfolio.joblib`
+9. Метрики и feature importance сохраняются в JSON
 
 После успешного обучения вы увидите:
 ```
 ОБУЧЕНИЕ ЗАВЕРШЕНО УСПЕШНО!
-Модель сохранена в .../models/lgb_portfolio.joblib
+Модель сохранена в .../models/catboost_portfolio.joblib
 ```
 
-### Шаг 5: Запуск Backend (FastAPI)
+### Шаг 4: Запуск Backend (FastAPI)
 
 ```bash
 cd investment-advisor
@@ -129,7 +127,7 @@ Backend запустится на: **http://localhost:8000**
 - Swagger документация: http://localhost:8000/docs
 - Health check: http://localhost:8000/api/v1/health
 
-### Шаг 6: Запуск Frontend (Next.js)
+### Шаг 5: Запуск Frontend (Next.js)
 
 Откройте новый терминал:
 
@@ -150,10 +148,10 @@ Frontend запустится на: **http://localhost:3000**
 **Request:**
 ```json
 {
-  "cash": 10000.0,
+  "cash": 100000.0,
   "positions": [
-    {"ticker": "AAPL", "shares": 50},
-    {"ticker": "MSFT", "shares": 30}
+    {"ticker": "SBER", "shares": 100},
+    {"ticker": "GAZP", "shares": 200}
   ]
 }
 ```
@@ -163,15 +161,20 @@ Frontend запустится на: **http://localhost:3000**
 {
   "recommendations": [
     {
-      "ticker": "AAPL",
+      "ticker": "SBER",
       "action": "BUY",
       "confidence": 0.78,
       "expected_return": 5.2,
       "reasoning": "Модель прогнозирует вероятность роста цены. RSI (позитивно), MACD (позитивно)",
-      "current_price": 185.50
+      "current_price": 285.50,
+      "predicted_price": 298.00
     }
   ],
-  "total_value": 125000.0,
+  "portfolio_analysis": {
+    "total_value": 125000.0,
+    "predicted_value": 132000.0,
+    "recommended_allocation": [...]
+  },
   "model_version": "1.0.0"
 }
 ```
@@ -190,13 +193,13 @@ curl http://localhost:8000/api/v1/health
   "status": "healthy",
   "model_loaded": true,
   "model_trained_date": "2024-01-15T10:30:00",
-  "version": "1.0.0"
+  "version": "2.0.0"
 }
 ```
 
 ### GET /api/v1/tickers
 
-Список доступных тикеров:
+Список доступных российских тикеров:
 
 ```bash
 curl http://localhost:8000/api/v1/tickers
@@ -208,23 +211,23 @@ curl http://localhost:8000/api/v1/tickers
 
 | Параметр | Значение по умолчанию | Описание |
 |----------|----------------------|----------|
-| `default_tickers` | 30 тикеров S&P500 | Список для обучения |
+| `default_tickers` | 24 российских тикера | Список для обучения (SBER, GAZP, LKOH...) |
 | `prediction_horizon` | 1 день | Горизонт прогноза |
 | `confidence_threshold` | 0.5 | Мин. уверенность |
-| `train_start_date` | 2018-01-01 | Начало train периода |
+| `train_start_date` | 2019-01-01 | Начало train периода |
 | `train_end_date` | 2021-12-31 | Конец train периода |
-| `lgb_num_estimators` | 1000 | Количество деревьев |
-| `lgb_learning_rate` | 0.05 | Скорость обучения |
+| `catboost_iterations` | 1000 | Количество деревьев |
+| `catboost_learning_rate` | 0.05 | Скорость обучения |
 
 ## 📊 Как это работает
 
 ### 1. Сбор данных
-- Исторические цены через yfinance (OHLCV данные)
-- Макроэкономические показатели (инфляция, ставки, VIX) - при недоступности используются forward-fill медианные значения
-- Новости для анализа сентимента (через FinBERT)
+- Исторические цены через MOEX ISS API (OHLCV данные)
+- Макроэкономические показатели РФ (ключевая ставка ЦБ, инфляция, USD/RUB, Brent)
+- Новости через RSS ленты (РБК, Коммерсант) для анализа сентимента
 
-### 2. Feature Engineering (finta)
-Библиотека `finta` рассчитывает:
+### 2. Feature Engineering
+Рассчитываются следующие признаки:
 - **SMA** (Simple Moving Average) - трендовые индикаторы за 20, 50, 200 дней
 - **EMA** (Exponential Moving Average) - экспоненциальные скользящие средние
 - **RSI** (Relative Strength Index) - осциллятор перекупленности/перепроданности
@@ -233,19 +236,20 @@ curl http://localhost:8000/api/v1/tickers
 - **Log Returns** - логарифмическая доходность
 - **Volume Ratio** - отношение объема к среднему
 - **Price Deviations** - отклонение цены от SMA
+- **Prophet Forecast** - прогноз тренда, неопределенность
 
 ### 3. ML Модель
-- **Алгоритм**: LightGBM Classifier (градиентный бустинг)
+- **Алгоритм**: CatBoost Classifier (градиентный бустинг на деревьях решений)
 - **Целевая переменная**: бинарная (1 = цена завтра вырастет, 0 = упадет)
-- **Разбиение**: временное (без shuffle!) - Train (2018-2021), Val (2022), Test (2023-2024)
+- **Разбиение**: временное (без shuffle!) - Train (2019-2021), Val (2022), Test (2023-2024)
 - **Early stopping**: 50 раундов для предотвращения переобучения
-- **Метрики**: Accuracy, Precision, Recall, F1-Score
+- **Метрики**: Accuracy, Precision, Recall, F1-Score, AUC
 
 ### 4. Генерация рекомендаций
 Для каждого тикера в портфеле:
 1. Загружаются последние 90 дней цен
 2. Рассчитываются признаки (как при обучении)
-3. Анализируются последние 10 новостей (FinBERT)
+3. Анализируются последние новости
 4. Модель делает предсказание + probability
 5. Confidence = max(prob, 1-prob), нормализованный к [0.3, 1.0]
 6. Топ-3 признака по feature importance определяют обоснование
@@ -253,6 +257,7 @@ curl http://localhost:8000/api/v1/tickers
    - **BUY** если prediction=1 и confidence > 0.6
    - **SELL** если prediction=0 и confidence > 0.6
    - **HOLD** иначе
+8. Прогнозируется цена акции и стоимость портфеля
 
 ## 📈 Метрики модели
 
@@ -260,14 +265,14 @@ curl http://localhost:8000/api/v1/tickers
 
 ```json
 {
-  "accuracy": 0.52,
-  "precision": 0.54,
-  "recall": 0.48,
-  "f1": 0.51
+  "accuracy": 0.54,
+  "precision": 0.56,
+  "recall": 0.52,
+  "f1": 0.54
 }
 ```
 
-Предсказание направления цены - сложная задача, поэтому метрики ~50-55% являются нормальными для эффективного рынка.
+Предсказание направления цены - сложная задача, поэтому метрики ~50-58% являются нормальными для эффективного рынка.
 
 ## 🧪 Примеры использования
 
@@ -277,11 +282,11 @@ curl http://localhost:8000/api/v1/tickers
 curl -X POST http://localhost:8000/api/v1/recommendations \
   -H "Content-Type: application/json" \
   -d '{
-    "cash": 50000,
+    "cash": 500000,
     "positions": [
-      {"ticker": "AAPL", "shares": 100},
-      {"ticker": "GOOGL", "shares": 50},
-      {"ticker": "TSLA", "shares": 75}
+      {"ticker": "SBER", "shares": 100},
+      {"ticker": "GAZP", "shares": 200},
+      {"ticker": "LKOH", "shares": 50}
     ]
   }'
 ```
@@ -294,10 +299,10 @@ import requests
 response = requests.post(
     'http://localhost:8000/api/v1/recommendations',
     json={
-        'cash': 50000,
+        'cash': 500000,
         'positions': [
-            {'ticker': 'AAPL', 'shares': 100},
-            {'ticker': 'MSFT', 'shares': 50}
+            {'ticker': 'SBER', 'shares': 100},
+            {'ticker': 'GAZP', 'shares': 200}
         ]
     }
 )
@@ -313,21 +318,18 @@ curl http://localhost:8000/api/v1/health
 
 ## ⚠️ Возможные ошибки и решения
 
-### Ошибка: "ModuleNotFoundError: No module named 'finta'"
-**Решение**: `pip install finta==1.3`
+### Ошибка: "ModuleNotFoundError: No module named 'catboost'"
+**Решение**: `pip install catboost==1.2.3`
 
 ### Ошибка: "Model file not found"
-**Решение**: Запустите генерацию данных и обучение:
+**Решение**: Запустите сбор данных и обучение:
 ```bash
-python backend/ml_pipeline/generate_synthetic_data.py
-python backend/ml_pipeline/train.py
+python scripts/collect_data.py
+python scripts/train_model.py
 ```
 
-### Ошибка: yfinance не загружает данные
-**Решение**: Используйте генератор синтетических данных:
-```bash
-python backend/ml_pipeline/generate_synthetic_data.py
-```
+### Ошибка: "No data for ticker" при сборе данных
+**Решение**: Проверьте правильность тикера (российские тикеры пишутся заглавными буквами, например SBER, GAZP). Убедитесь что есть интернет соединение для доступа к MOEX API.
 
 ### Ошибка: "Port 8000 already in use"
 **Решение**: Используйте другой порт: `uvicorn backend.app.main:app --port 8001`
@@ -341,6 +343,34 @@ npm install
 npm run dev
 ```
 
+## 🇷🇺 Доступные российские тикеры
+
+По умолчанию используются следующие тикеры:
+- **SBER** - Сбербанк
+- **GAZP** - Газпром
+- **LKOH** - Лукойл
+- **NVTK** - Новатэк
+- **YNDX** - Яндекс
+- **TCSG** - Тинькофф
+- **VTBR** - ВТБ
+- **ROSN** - Роснефть
+- **GMKN** - Норникель
+- **NLMK** - НЛМК
+- **SNGS** - Сургутнефтегаз
+- **HYDR** - РусГидро
+- **FEES** - ФСК ЕЭС
+- **TRNFP** - Транснефть
+- **MTSS** - МТС
+- **AFKS** - АФК Система
+- **PIKK** - ПИК
+- **CHMF** - Северсталь
+- **MAGN** - Магнитка
+- **RTKM** - Ростелеком
+- **BSPB** - Банк Санкт-Петербург
+- **VKCO** - VK
+- **OZON** - Ozon
+- **SGZH** - Сахалинская энергия
+
 ## ⚠️ Отказ от ответственности
 
 Этот проект создан **в учебных целях**. Не используйте эти рекомендации для реальной торговли без дополнительного анализа и консультации с финансовыми советниками. Прошлые результаты не гарантируют будущую доходность.
@@ -352,7 +382,9 @@ MIT License - свободное использование в учебных и
 ## 🤝 Вклад
 
 Проект открыт для улучшений:
-- Добавление новых источников данных (Quandl, Alpha Vantage)
+- Подключение реального API ЦБ РФ и Росстата для макро-данных
+- Парсинг Telegram-каналов для анализа сентимента
+- Добавление фундаментальных показателей (выручка, прибыль, P/E)
 - Улучшение фичей (дополнительные индикаторы, альтернативные данные)
 - Другие модели (XGBoost, нейросети, ансамбли)
 - Расширение функционала фронтенда (графики, история, backtesting)

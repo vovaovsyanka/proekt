@@ -16,8 +16,5 @@ requests==2.31.0
 python-dotenv==1.0.0
 feedparser==6.0.10
 
-# MOEX API
-moexalgo==2.5.10
-
 # Time series forecasting
 prophet==1.1.5
